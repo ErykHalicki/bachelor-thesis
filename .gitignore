@@ -1,0 +1,12 @@
+# temporary: hides LaTeX build artifacts from the editor file tree
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.DS_Store

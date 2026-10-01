@@ -1,0 +1,10 @@
+In most Robot Learning research, visuo-motor policies, world models, and world action models (WAMs) are conventionally trained once, offline, on a fixed dataset of
+demonstrations, and then frozen at evaluation time. This approach provides no mechanism for models to correct
+themselves from their own experience. However, a growing body of recent work 
+\citep{wang2026adajepa,jiang2026robotttcontextscaling,ye2026dreamzero} suggests this need
+not be the case.
+
+This thesis investigates which methods, if any,
+let a WAM be post or test-time trained on its own rollout data to improve task completion
+performance on real-world robotic manipulation tasks, while avoiding catastrophic forgetting or loss of
+plasticity \citep{elsayed2023utility}.
