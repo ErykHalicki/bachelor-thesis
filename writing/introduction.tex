@@ -1,0 +1,20 @@
+\section{Introduction}
+
+\dots
+
+Problem: Most robot learning models are frozen at deployment, and cannot improve from their own experience. This wastes compute used on inference and potential self supervision signal from the robots experience. 
+
+%Potential Solutions: 
+%- Fine tune a WAM or WM on its own rollout data and seeing if this improves world modelling and policy performance
+%    - how does the world modelling objective influence the policy objective? is there positive transfer? shown in wams\cite{yuan2026fast} but not wm's + policy setups
+%    - WM + policy is not really a proven recipe yet
+%        - Not true! UVA and UWM, Motus, etc. all show that this works 
+
+%- Add in context learning using some kind of memory system or increasing context length
+%    - eg. using memory layers like \cite{jiang2026robotttcontextscaling}
+%    - Just scale context length (e.g. use mamba arch, RNN, or just scale compute)
+%    - add RAG style memories
+
+Tentative best idea: Train a UWM style model (maybe literally their model for initial experiments), and continue training FDM and IDM losses on all rollout data, and fine tune all training losses on successful trajectories (optionally graded by a VLM or decision model style extension, find the paper that infers reward using the final layer embedding of a vlm to calcualte reward). 
+
+Optionally can try something like \cite{chen2026robot} where you additionally train on failed rollouts by attempting to "repair" them using an IDM + Value model.

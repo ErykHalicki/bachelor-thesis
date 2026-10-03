@@ -8,11 +8,15 @@ Many recent methods have found success using end-to-end models, often referred t
 
 These policies model a conditional distribution $\pi_\theta(a \mid o)$ of actions $a$ (eg. robot gripper pose, joint states, wheel velocity), given some observation $o$ (eg. camera input, joint states, depth maps, tactile inputs), such that the generated actions optimize some training objective. There are two prevalent approaches for training such robot learning policies: Reinforcement Learning and Behaviour Cloning, which primarily differ in their training objective and source of training data.
 
+%add Classical vs Robot Learning diagram 
+
 \subsubsection{Reinforcement Learning}
 
 Reinforcement Learning (RL) methods work by training a policy to maximize some reward signal $r$ through trial-and-error interaction\cite{tang2025deep}.
 This approach to robot learning allows for autonomous improvement of policies, as long as a reliable reward signal is available. This can prove difficult in the physical world, given that the world state needed for reward calculation needs to be inferred, unlike in simulated environments where world state is directly accessible. Furthermore, many RL algorithms require explicit exploration of their environments, which can be dangerous or time consuming on real hardware. Some other difficulties include reward hacking, reward specification, and sample inefficiency. Some of these obstacles have inspired work on sim2real methods, where models are first trained in simulation, and then adapted for use in the real world. %add more citations of RL projects 
 It's important to note however, that a growing body of work has tested methods to get Reinforcement Learning working outside of hand coded simulators, whether that be in learned world models (section \ref{sec:worldmodels}), or in the physical world.
+
+%add diagram
 
 \subsubsection{Behaviour Cloning}
 
@@ -20,6 +24,7 @@ Many current Robot Learning systems utilize Behaviour Cloning (BC) to avoid the 
 In parallel, large cross-embodiment datasets that pool demonstrations across many robots, tasks, and labs have made it possible to pre-train a single policy on far more data than any individual setup could produce, which has been a key enabler of generalist robot policies. %CITE Open X-Embodiment, AgiBot World, DROID, others
 Although relatively simple to implement on real world tasks, Behaviour Cloning methods have their own distinct drawbacks. For example, models trained using BC can be susceptible to compounding error, causal confusion, mode averaging, over-fitting to expert demonstrations, and distributional shift. % CITE all
 Despite these shortcomings, Behaviour Cloning methods, especially when paired with foundation models, have been the main driving force of recent advancements in robotic manipulation research.
+%add diagram
 
 \subsubsection{Visuo-motor policies and action distribution modelling}
 
@@ -41,12 +46,13 @@ World Action Models (WAMs, or sometimes called Video Action Models / VAMs) are a
 Existing WAMs can be broadly divided into two designs. In inverse dynamics (IDM) based approaches, a video model first predicts future observations, and a separate inverse dynamics model then infers the actions that would produce the predicted transition. %CITE UniPi, MimicVideo
 This allows the video model to be trained on action-free video, with only the IDM requiring action-labelled robot data, but errors in the predicted video propagate directly into the actions. In joint approaches, a single model denoises video and action tokens together, so that action prediction attends directly to the predicted future~\citep{zhu2025uwm, ye2026dreamzero}.
 
-The strong generalization reported for WAMs~\citep{ye2026dreamzero} has been attributed to two, not mutually exclusive, factors. The first is their prior: video generation models are pre-trained on web-scale video, and therefore already encode knowledge about object permanence, motion, and physical interaction. The second is the training objective: predicting future observations provides a dense supervisory signal that forces the model to learn scene dynamics, whereas action labels are low-dimensional and comparatively scarce. Disentangling the contribution of each remains an open question.
+The strong generalization reported for WAMs~\citep{ye2026dreamzero} has been attributed to two, not mutually exclusive, factors. The first is their prior: video generation models are pre-trained on web-scale video, and therefore already encode knowledge about object permanence, motion, and physical interaction. The second is the training objective: predicting future observations provides a dense supervisory signal that forces the model to learn scene dynamics, whereas action labels are low-dimensional and comparatively scarce. Disentangling the contribution of each remains an open question.\cite{zhu2025uwm}
+%lowk uwm shows that the training objective helps even when initialized from scratch
 %CITE ablations on pre-training vs future prediction objective if available
 
 The main drawback of WAMs is their computational cost, since generating future video requires many denoising steps over a high-dimensional latent, resulting in latency that is problematic for closed-loop control. %CITE FastWAM
 
-\subsection{World Models}
+\subsection{World Modelling}
 \label{sec:worldmodels}
 World Models (WMs) are action-conditioned models (not to be confused with action-generative WAMs) that predict how a world will evolve given some action sequence. This action sequence is not necessarily raw inputs to a robot, and can instead be some latent representation of meta-actions, language instructions, or any other modality that represents an action an agent takes to alter its environment. Similarly, the output of a World Model does not necessarily need to be visual, it can be any observed modality that represents world state (eg. tactile inputs, depth maps, audio, latent representations). 
 
@@ -62,9 +68,13 @@ This approach to representation learning may be especially useful in robot learn
 
 \subsection{Continual Learning}
 
+\subsubsection{Catastrophic Forgetting}
+
 
 \subsubsection{Loss of Plasticity}
 
-\subsubsection{TBD other continual learning literature}
-
+\subsubsection{Continual Learning in Robotics}
+%read and cite alternative continual improvement method baselines from \cite{chen2026robot}
+\citep{powers2023continual}
+\cite{chen2026robot}
 
