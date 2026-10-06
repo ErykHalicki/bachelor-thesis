@@ -1,0 +1,6 @@
+defaults:
+  - b601_zed_and_wrist
+  - _self_
+
+# 60 s at fps 30. pnpT successes land near 36 s; failures otherwise run the cap out
+max_episode_steps: 1800

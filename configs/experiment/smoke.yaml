@@ -1,0 +1,19 @@
+defaults:
+  - base
+  - _self_
+
+batch_size: 64
+effective_batch: null
+mixed_precision: "no"
+max_steps: 80
+log_every: 50
+num_workers: 0
+pin_memory: false
+lr_warmup_steps: 0
+save_every: 0
+eval_every: 0
+
+optimizer:
+  name: adamw
+  lr: 5.0e-3
+  weight_decay: 0.0

@@ -1,0 +1,7 @@
+name: dummy
+obs_dim: 16
+target_dim: 4
+hidden: 64
+
+conditioning: [observation]
+predict: [target]

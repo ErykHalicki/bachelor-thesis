@@ -1,3 +1,10 @@
 [submodule "external/ocbench"]
 	path = external/ocbench
 	url = https://github.com/seohongpark/ocbench
+[submodule "external/lerobot"]
+	path = external/lerobot
+	url = https://github.com/ErykHalicki/lerobot.git
+	branch = b601-dataset-robot-config
+[submodule "external/vjepa2"]
+	path = external/vjepa2
+	url = https://github.com/facebookresearch/vjepa2

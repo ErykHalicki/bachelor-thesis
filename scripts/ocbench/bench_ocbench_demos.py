@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-OCBENCH = Path(__file__).resolve().parents[1] / "external" / "ocbench"
+OCBENCH = Path(__file__).resolve().parents[2] / "external" / "ocbench"
 sys.path.insert(0, str(OCBENCH / "impls"))
 
 import ocbench

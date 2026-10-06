@@ -1,0 +1,15 @@
+# Default config for gravity_compensation.py: GravityCompConfig's own defaults,
+# nothing rig-specific. Everything is overridable on the CLI, e.g.
+#
+#   ./src/thesis/scripts/b601/gravity_compensation.sh dry_run=true
+#   ./src/thesis/scripts/b601/gravity_compensation.sh gain=0.95 hold=true
+#   ./src/thesis/scripts/b601/gravity_compensation.sh '++scale={elbow_flex: 1.2}'
+#   ./src/thesis/scripts/b601/gravity_compensation.sh '++joints=[shoulder_lift]'
+#
+# A rig that permanently carries something on the gripper is worth its own
+# config file (defaults: - gravity_schema) setting payload_kg/payload_com, so
+# the mass doesn't have to be re-typed every session.
+
+defaults:
+  - gravity_schema
+  - _self_

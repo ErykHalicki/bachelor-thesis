@@ -1,0 +1,9 @@
+# @package _global_
+# b601_irl on the pnpT rig, with pnpT's one-minute episode cap:
+#
+#   python main.py run=b601_irl_pnpt load=<run_id|ckpt.pt>
+
+defaults:
+  - b601_irl
+  - override /eval: b601_pnpt
+  - _self_

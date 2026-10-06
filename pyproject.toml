@@ -1,0 +1,65 @@
+[project]
+name = "bachelor-thesis"
+version = "0.1.0"
+description = "Bachelor thesis"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "accelerate",
+    "hydra-core",
+    "omegaconf",
+    "numpy",
+    "scipy",
+    "rotary-embedding-torch>=0.9.1",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb", "pandas", "moviepy"]
+dev = ["pytest", "pytest-cov"]
+lerobot = ["lerobot[dataset]"]
+# Diffusion pulls in `diffusers`, which a base lerobot install does not carry
+baselines = ["bachelor-thesis[lerobot]", "lerobot[diffusion]", "lerobot[pi]", "lerobot[smolvla]"]
+b601 = ["bachelor-thesis[lerobot]", "lerobot[rebot,hardware,zed]"]
+# the external/vjepa2 submodule is read off sys.path rather than installed, so its
+# requirements never reach a resolver. Capped below 1.1 like lerobot's own pin:
+# the vendored code imports the deprecated `timm.models.layers`.
+vjepa = ["timm>=1.0,<1.1"]
+serve = ["bachelor-thesis[wandb]", "opencv-python-headless"]
+all = ["bachelor-thesis[lerobot,dev,wandb,b601,serve,vjepa,baselines]"]
+
+[tool.uv.sources]
+lerobot = { path = "external/lerobot", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/thesis"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.coverage.run]
+source = ["thesis"]
+omit = ["*/ckpt_utils.py"]
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "except ImportError",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::FutureWarning:timm",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+exclude = [
+    "**/__pycache__",
+    "external",
+]

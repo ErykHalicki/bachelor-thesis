@@ -1,0 +1,6 @@
+backend: dummy
+n: 1024
+obs_dim: 16
+target_dim: 4
+weight_seed: 0
+seed: 0

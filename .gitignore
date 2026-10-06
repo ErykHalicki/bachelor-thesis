@@ -11,3 +11,19 @@
 *.synctex.gz
 *.DS_Store
 *.pdf
+
+# python / runs
+__pycache__/
+*.py[codz]
+.venv
+.venv-*/
+uv.lock
+.pytest_cache/
+outputs/
+multirun/
+wandb/
+latest-run
+scratch/
+data/
+weights/
+src/thesis/scripts/b601/.env

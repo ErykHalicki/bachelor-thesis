@@ -1,0 +1,33 @@
+# Template for a dataset-specific recording config. Copy this file per
+# dataset (e.g. configs/pick_and_place.yaml) so the recording settings for
+# that dataset stay fixed across sessions instead of being re-typed as CLI
+# overrides every time. Only set what should differ from RecordConfig's
+# defaults (src/thesis/scripts/b601/record.py) -- usually repo_id, task, and
+# which cameras the rig has.
+#
+# Run with:
+#   ./src/thesis/scripts/b601/record.sh --config-name=example_task
+#
+# Cameras come from one of two places, and can be combined:
+#
+#   1. `- cameras: <name>` below, naming a file in configs/cameras/. Datasets
+#      recorded on the same rig share that one file instead of copying it.
+#   2. an inline `cameras:` block here, in the same shape (the yaml form of
+#      lerobot's --robot.cameras='{...}'), for an arrangement only this dataset
+#      uses. Written alongside a selected file, it merges on top of it, so a
+#      dataset can tweak, extend, or trim a shared rig without copying it:
+#        cameras:
+#          zed_left: {width: 1280, height: 720}   # override one field
+#          overhead: {type: opencv, index_or_path: /dev/video4, fps: 30}
+#          wrist_cam: null                        # drop an inherited camera
+#
+# Adding, dropping, or renaming a camera changes the dataset's observation keys,
+# so a rig change means a new dataset, not a resume.
+
+defaults:
+  - record_schema
+  - cameras: zed
+  - _self_
+
+repo_id: ehalicki/b601_test
+num_episodes: 1

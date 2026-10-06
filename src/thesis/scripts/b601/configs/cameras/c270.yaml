@@ -1,0 +1,31 @@
+# A Logitech C270 on the wrist mount. The key below is what the camera becomes
+# in the dataset (`observation.images.wrist_cam`), so it names the mount rather
+# than the hardware -- swapping in a different webcam later keeps the datasets
+# comparable.
+#
+# `index_or_path: auto` picks the lowest-numbered USB capture node that isn't one
+# of the ZED's own (a ZED enumerates as a UVC device too, and can land at a low
+# index) and isn't already claimed by another camera in the same rig. Pin it to a
+# /dev/v4l/by-id/... path if a second webcam is attached.
+#
+# The C270 offers a single discrete fps per resolution in MJPG mode, and
+# OpenCVCamera hard-fails connect() if the driver can't set the exact rate asked
+# for, so `fps` here is the camera's own rate and independent of the dataset's.
+# MJPG rather than cv2's default mode is what makes that rate achievable at all.
+# warmup_s is raised from the 1s default because the C270 returns blank or
+# corrupt buffers for a couple of seconds after a mode change.
+#
+# `backend` is pinned because cv2's default (ANY) can pick FFMPEG for a
+# /dev/video* node, and FFMPEG ignores every property set on it: fourcc, size
+# and fps all silently fail to apply and connect() then hard-fails.
+
+wrist_cam:
+  type: opencv
+  index_or_path: auto
+  width: 640
+  height: 360
+  fps: 30
+  fourcc: MJPG
+  backend: V4L2
+  color_mode: rgb
+  warmup_s: 3
