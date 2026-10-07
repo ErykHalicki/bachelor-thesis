@@ -50,16 +50,16 @@ Put the `export` in the run script or shell rc so every process sees it.
 
 ## 3. Precision: fp16, never bf16
 
-The V100 has no bf16 tensor cores. Under `mixed_precision: bf16` (the repo default in
-`configs/experiment/base.yaml`):
+The V100 has no bf16 tensor cores. Under `mixed_precision: bf16`:
 
 - `F.scaled_dot_product_attention` falls back to the MATH backend, materializing the
   full `B*H*N*N` score matrix with no memory-efficient kernel.
 - every ViT-B and DiT GEMM runs without tensor-core acceleration. Measured about 5x
   slower than fp16, and slower than plain fp32.
 
-Always pass `experiment.mixed_precision=fp16`. Accelerate adds the grad scaler
-automatically. Watch the first few hundred steps for fp16 overflow while the loss
+`fp16` is the repo default (`configs/experiment/base.yaml`), so nothing needs passing;
+only an explicit `experiment.mixed_precision=bf16` reintroduces the slowdown. Accelerate
+adds the grad scaler automatically. Watch the first few hundred steps for fp16 overflow while the loss
 scale settles.
 
 ## 4. Gradient checkpointing must stay on
@@ -119,7 +119,7 @@ cd /path/to/thesis
 export LD_LIBRARY_PATH=$(ls -d .venv-v100/lib/python3.12/site-packages/nvidia/*/lib | tr '\n' ':')$LD_LIBRARY_PATH
 export CC=gcc CXX=g++
 .venv-v100/bin/python main.py run=<arm> \
-  experiment.mixed_precision=fp16 experiment.num_workers=8 \
+  experiment.num_workers=8 \
   wandb.mode=online wandb.entity=<entity>
 ```
 
