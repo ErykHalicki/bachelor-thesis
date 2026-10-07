@@ -1,0 +1,11 @@
+defaults:
+  - ocbench_base
+  - _self_
+
+env_name: block-single-task1-v0
+
+# OCBench actions sit in [-1, 1] already; the state vector mixes positions, velocities and
+# contact flags on very different scales
+normalize:
+  keys: [action, observation.state]
+  method: mean_std

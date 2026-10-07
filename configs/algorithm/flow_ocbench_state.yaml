@@ -1,0 +1,61 @@
+# A state-based flow policy for OCBench: the 28-d state vector in, a 25-step chunk of
+# 7-d joint-delta actions out. 25 is OCBench's own action chunk length.
+name: generic_vit_predictor
+
+state_dim: 28
+action_dim: 7
+chunk_len: 25
+action_fps: 50          # OCBench control rate: 0.02 s per step
+action_index: "0..24"
+action_history_index: "-25..-1"
+
+model:
+  model_dim: 256
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  # one token per step, as with pooled vision: nothing populates a `width` axis
+  rope:
+    time: {share: 0.6, period: auto}
+    seq:  {share: 0.2, period: auto}
+
+num_flow_steps: 10
+inference_streams: null
+execute_len: ${algorithm.chunk_len}
+
+encoders: {}
+
+conditioning:
+  state_context:
+    from: observation.state
+    dim: ${algorithm.state_dim}
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  action_context:
+    from: action
+    role: action
+    via: null
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_history_index}
+    fps: ${algorithm.action_fps}
+
+predict:
+  action:
+    from: action
+    type: flow
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    block_size: ${algorithm.chunk_len}
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out:
+      type: mlp
+      mlp_dim: 64
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

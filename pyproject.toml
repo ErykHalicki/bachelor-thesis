@@ -24,11 +24,14 @@ b601 = ["bachelor-thesis[lerobot]", "lerobot[rebot,hardware,zed]"]
 # requirements never reach a resolver. Capped below 1.1 like lerobot's own pin:
 # the vendored code imports the deprecated `timm.models.layers`.
 vjepa = ["timm>=1.0,<1.1"]
+# OCBench's GPU (MJWarp) envs. A V100 needs the CUDA 12 warp-lang build: docs/v100_setup.md
+ocbench = ["ocbench[mjwarp]"]
 serve = ["bachelor-thesis[wandb]", "opencv-python-headless"]
 all = ["bachelor-thesis[lerobot,dev,wandb,b601,serve,vjepa,baselines]"]
 
 [tool.uv.sources]
 lerobot = { path = "external/lerobot", editable = true }
+ocbench = { path = "external/ocbench", editable = true }
 
 [build-system]
 requires = ["hatchling"]

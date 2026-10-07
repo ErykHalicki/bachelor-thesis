@@ -122,3 +122,19 @@ export CC=gcc CXX=g++
   experiment.mixed_precision=fp16 experiment.num_workers=8 \
   wandb.mode=online wandb.entity=<entity>
 ```
+
+## OCBench (MJWarp)
+
+`warp-lang` on PyPI is a CUDA 13 build, and CUDA 13 dropped Volta: the first MJWarp kernel
+launch fails with `CUDA 13.x requires sm_75 or higher`. Install the `+cu12` wheel from the
+Warp GitHub release over it, matching the version the `ocbench` extra resolved:
+
+```bash
+uv pip install --python .venv-v100/bin/python -e ".[ocbench]"
+uv pip install --python .venv-v100/bin/python --reinstall-package warp-lang \
+  "warp-lang @ https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0%2Bcu12-py3-none-manylinux_2_28_x86_64.whl"
+```
+
+The first rollout compiles Warp's kernels for sm_70, about 6 minutes; they are cached in
+`~/.cache/warp` after that. On eryk-pc the V100 is `CUDA_DEVICE_ORDER=PCI_BUS_ID
+CUDA_VISIBLE_DEVICES=1`.

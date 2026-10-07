@@ -1,0 +1,21 @@
+# @package _global_
+# A state-based flow policy on OCBench block-single, scored by batched MJWarp rollouts:
+#
+#   python main.py run=flow_ocbench_block_single dataset.dataset_path=$HOME/data/ocbench
+defaults:
+  - override /dataset: ocbench_block_single
+  - override /algorithm: flow_ocbench_state
+  - override /eval: ocbench
+
+best_metric: success_rate
+best_mode: max
+
+experiment:
+  batch_size: 1024
+  effective_batch: null
+  max_steps: 100000
+  eval_every: 5000
+  save_every: 5000
+  lr_warmup_steps: 1000
+  optimizer:
+    lr: 1.0e-4

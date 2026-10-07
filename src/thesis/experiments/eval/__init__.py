@@ -18,6 +18,9 @@ def build_eval(cfg):
     if backend == "lerobot":
         from .lerobot import LeRobotEval
         return LeRobotEval(cfg)
+    if backend == "ocbench":
+        from .ocbench import OCBenchEval
+        return OCBenchEval(cfg)
     raise ValueError(
         f"eval backend '{backend}' not installed. "
         f"try: uv pip install 'bachelor-thesis[{backend}]'"

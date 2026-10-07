@@ -1,0 +1,21 @@
+backend: ocbench
+env_name: ???
+dataset_path: null    # a .npz file, a directory of them, or a glob; null downloads the env's data
+dataset_root: null    # download directory; null uses OCBench's own cache
+num_shards: null
+# OCBench trains on successful episodes only: its scripted policy makes deliberate mistakes,
+# and the episodes that run out the clock correcting one never reach the goal
+success_only: true
+episodes: null
+validation_split: 0.05
+# training and validation must draw with the same seed or their splits overlap
+validation_split_seed: 0
+columns: {}
+cameras: [front, side, wrist]   # a visual env's camera axis, in env order
+image_size: null      # [H, W]
+return_uint8: true
+drop_boundary: true
+augment: null
+
+conditioning: ${algorithm.conditioning}
+predict: ${algorithm.predict}

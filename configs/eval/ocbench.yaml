@@ -1,0 +1,32 @@
+backend: ocbench
+env_name: ${dataset.env_name}   # interpolated so the evaluated task cannot drift from the trained one
+dataset: ${dataset}             # for the held-out loss reported beside the success rate
+
+episodes: 200
+num_envs: 200                   # worlds per GPU batch; episodes run in waves of this size
+max_episode_steps: null         # null: the env's registered limit (1250 for block-single)
+seed: 0
+cameras: ${dataset.cameras}
+max_videos: 2
+video_stride: 10
+holdout: true
+
+execute_len: null               # null: the model's own
+num_flow_steps: null
+cfg_scale: null
+image_size: ${dataset.image_size}
+columns: ${dataset.columns}
+slices: {}
+task: null
+action_filter:
+  enabled: false
+
+# held-out loss knobs (OfflineEval)
+batch_size: 256
+max_batches: 20
+num_workers: 4
+
+server: null
+run: null
+server_timeout: 120
+jpeg_quality: 95

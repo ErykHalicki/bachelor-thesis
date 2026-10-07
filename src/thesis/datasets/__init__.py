@@ -1,3 +1,6 @@
+EPISODIC_BACKENDS = {"lerobot", "ocbench"}
+
+
 def live_fields(source):
     """The batch fields a source serves (lerobot: its spec fields; other backends: their
     provided modalities) -- what an augmentation pattern can match."""
@@ -35,10 +38,10 @@ def build_dataset(cfg, norm_stats_override=None, augment=True, split=None,
         )
     # a backend with no episodes has nothing to hold out, so "train" is all of it;
     # "val" would silently hand back the training data
-    if split == "val" and backend != "lerobot":
+    if split == "val" and backend not in EPISODIC_BACKENDS:
         raise ValueError(
             f"split='val' needs episodes to hold out, which the '{backend}' backend does "
-            f"not have; only the lerobot backend supports a held-out split"
+            f"not have; only {sorted(EPISODIC_BACKENDS)} support a held-out split"
         )
     if backend == "dummy":
         from .dummy import DummySource
@@ -48,6 +51,9 @@ def build_dataset(cfg, norm_stats_override=None, augment=True, split=None,
         source = LeRobotSource(cfg, split=split, subsample=subsample,
                                cache_fields=cache_fields, cache_draws=cache_draws,
                                keep_pixels=keep_pixels)
+    elif backend == "ocbench":
+        from .ocbench import OCBenchSource
+        source = OCBenchSource(cfg, split=split)
     else:
         raise ValueError(
             f"backend '{backend}' not installed. "
