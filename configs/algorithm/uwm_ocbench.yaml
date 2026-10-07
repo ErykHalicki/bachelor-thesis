@@ -1,0 +1,139 @@
+# A Unified World Model (Zhu et al. 2025, external/unified-world-model) on OCBench: one flow
+# transformer over an action chunk and the next camera frames, with an INDEPENDENT flow time
+# per stream. Pinning streams at inference picks the mode, all from one set of weights:
+#
+#   policy             futures pinned at noise (t=0), actions denoised   (inference_clamp)
+#   forward dynamics   actions pinned clean (t=1), futures denoised
+#   inverse dynamics   futures pinned clean, actions denoised
+#   video prediction   actions pinned at noise, futures denoised
+#   joint              both denoised together                            (no clamp)
+#
+# Frames are predicted as frozen ImageNet ResNet18 latents -- a 4x4 grid of 512-d features
+# per 128 px frame -- never pixels. Frozen, so the targets cannot collapse and need no
+# sigreg; measured on the collected frames they sit near unit scale (std ~1.2-1.4 per dim).
+name: generic_vit_predictor
+
+action_dim: 7
+chunk_len: 25
+action_fps: 50          # OCBench control rate: 0.02 s per step
+video_fps: 2            # one frame per 25-step chunk
+action_index: "0..24"
+action_history_index: "-25..-1"
+
+model:
+  model_dim: 512
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  rope:
+    time:   {share: 0.4, period: auto}
+    seq:    {share: 0.2, period: auto}
+    height: {share: 0.2, period: auto}
+    width:  {share: 0.2, period: auto}
+
+# UWM samples each stream's time on its own. The endpoint masses train the exact states
+# inference pins a stream to: at noise (marginalized) or clean (given)
+flow_time:
+  independent: true
+  noise_prob: 0.1
+  clean_prob: 0.1
+
+# the rollout eval drives the POLICY mode: futures marginalized at noise
+inference_clamp:
+  front_future: 0.0
+  wrist_future: 0.0
+
+num_flow_steps: 10
+inference_streams: null
+execute_len: ${algorithm.chunk_len}
+
+encoders:
+  resnet:
+    type: resnet
+    variant: resnet18
+    weights: pretrained
+    pooling: grid       # (128 / 32)^2 = a 4x4 grid per frame
+    frozen: true
+
+conditioning:
+  qpos_context:
+    from: qpos
+    dim: 21
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  qvel_context:
+    from: qvel
+    dim: 20
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  front_context:
+    from: observation.images.front
+    encoder: resnet
+    dim: 512
+    index: "-1..0"
+    raw_index: "-25, 0"
+    fps: ${algorithm.video_fps}
+    grid: [4, 4]
+  wrist_context:
+    from: observation.images.wrist
+    encoder: resnet
+    dim: 512
+    index: "-1..0"
+    raw_index: "-25, 0"
+    fps: ${algorithm.video_fps}
+    grid: [4, 4]
+  action_context:
+    from: action
+    role: action
+    via: null
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_history_index}
+    fps: ${algorithm.action_fps}
+
+predict:
+  action:
+    from: action
+    type: flow
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    block_size: ${algorithm.chunk_len}
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out: {type: mlp, mlp_dim: 64}
+  front_future:
+    from: observation.images.front
+    encoder: resnet
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [4, 4]
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out: {type: mlp, mlp_dim: 1024}
+  wrist_future:
+    from: observation.images.wrist
+    encoder: resnet
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [4, 4]
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out: {type: mlp, mlp_dim: 1024}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: flow, stream: front_future, weight: 1.0}
+  - {type: flow, stream: wrist_future, weight: 1.0}
+  # observed only (weight 0): the integrated endpoints, scored on held-out batches
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

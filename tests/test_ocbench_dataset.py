@@ -166,5 +166,107 @@ def test_sparse_datasets_are_refused(tmp_path):
     data = dict(np.load(tmp_path / "shard.npz"))
     data["observation_interval"] = np.asarray(5, dtype=np.int32)
     np.savez(tmp_path / "shard.npz", **data)
-    with pytest.raises(ValueError, match="sparse observations"):
+    with pytest.raises(ValueError, match="sparse state observations"):
         build_dataset(_cfg(tmp_path))
+
+
+def _write_sparse(path, episodes, interval):
+    """The layout scripts/collect_ocbench_visual.py writes: dense per-step columns in the
+    .npz, and frames every `interval` steps (plus each episode's final one) in a memory-
+    mapped `-pixels.npy`. Step t of episode e has qpos[0] = 100*e + t, and the frame of
+    step s has every pixel 10*e + s // interval on camera 0, +100 on camera 1 (the final
+    frame uses 10*e + 9).
+    """
+    actions, qpos, rewards, terminals, frames = [], [], [], [], []
+    for e, (length, success) in enumerate(episodes):
+        steps = 100 * e + np.arange(length, dtype=np.float32)
+        actions.append(np.repeat(steps[:, None], ACTION_DIM, axis=1))
+        qpos.append(np.repeat(steps[:, None], 4, axis=1))
+        reward = np.zeros(length, dtype=np.float32)
+        reward[-1] = float(success)
+        terminal = np.zeros(length, dtype=bool)
+        terminal[-1] = True
+        rewards.append(reward)
+        terminals.append(terminal)
+        values = [10 * e + s // interval for s in range(0, length, interval)] + [10 * e + 9]
+        for v in values:
+            frame = np.zeros((2, 4, 6, 3), dtype=np.uint8)
+            frame[0], frame[1] = v, v + 100
+            frames.append(frame)
+    np.savez(
+        path,
+        actions=np.concatenate(actions),
+        qpos=np.concatenate(qpos),
+        rewards=np.concatenate(rewards),
+        terminals=np.concatenate(terminals),
+        masks=np.ones(sum(length for length, _ in episodes), dtype=np.float32),
+        observation_interval=np.asarray(interval, dtype=np.int32),
+    )
+    np.save(str(path)[: -len(".npz")] + "-pixels.npy", np.stack(frames))
+
+
+def _sparse_cfg(path, **overrides):
+    base = {
+        "cameras": ["front", "wrist"],
+        "conditioning": {
+            "qpos": {"index": "-1..0"},
+            "observation.images.front": {"index": "-5, 0"},
+        },
+        "predict": {
+            "action": {"index": "0..4"},
+            "observation.images.wrist": {"index": "5"},
+        },
+    }
+    return _cfg(path, **{**base, **overrides})
+
+
+def test_sparse_frames_land_on_stored_rows(tmp_path):
+    # episode 0: 12 steps, frames at 0, 5, 10 and the final one (step 12)
+    _write_sparse(tmp_path / "shard-000.npz", [(12, True), (7, True)], interval=5)
+    dataset = build_dataset(_sparse_cfg(tmp_path))
+    # decision points are multiples of 5 whose action window fits: 0, 5 (ep 0), 0 (ep 1)
+    assert len(dataset) == 3
+    second = dataset[1]                     # episode 0, t = 5
+    assert second["qpos"][:, 0].tolist() == [4.0, 5.0]
+    assert second["action"][:, 0].tolist() == [5.0, 6.0, 7.0, 8.0, 9.0]
+    assert second["observation.images.front"][:, 0, 0, 0].tolist() == [0, 1]
+    assert second["observation.images.front"].shape == (2, 3, 4, 6)
+    assert second["observation.images.wrist"][:, 0, 0, 0].tolist() == [102]
+    # episode 1 (7 steps, t = 0): its future frame at step 5 is a stored row, and the
+    # history before step 0 clamps onto the first frame
+    third = dataset[2]
+    assert third["observation.images.front"][:, 0, 0, 0].tolist() == [10, 10]
+    assert third["observation.images.wrist"][:, 0, 0, 0].tolist() == [111]
+
+
+def test_a_future_frame_past_the_end_is_the_final_observation(tmp_path):
+    _write_sparse(tmp_path / "shard-000.npz", [(7, True)], interval=5)
+    dataset = build_dataset(_sparse_cfg(
+        tmp_path,
+        predict={"action": {"index": "0"}, "observation.images.wrist": {"index": "10"}},
+        drop_boundary=False,
+    ))
+    first = dataset[0]
+    assert first["observation.images.wrist"][:, 0, 0, 0].tolist() == [109]
+
+
+def test_camera_offsets_must_be_multiples_of_the_frame_interval(tmp_path):
+    _write_sparse(tmp_path / "shard-000.npz", [(12, True)], interval=5)
+    with pytest.raises(ValueError, match="multiple"):
+        build_dataset(_sparse_cfg(
+            tmp_path, conditioning={"observation.images.front": {"index": "-1..0"}},
+        ))
+
+
+def test_sparse_frames_are_memory_mapped(tmp_path):
+    _write_sparse(tmp_path / "shard-000.npz", [(12, True)], interval=5)
+    dataset = build_dataset(_sparse_cfg(tmp_path))
+    assert isinstance(dataset._frames[0], np.memmap)
+    assert dataset.stats_columns(["qpos"])["qpos"].shape == (12, 4)
+
+
+def test_max_episodes_caps_the_kept_episodes_before_the_split(data_dir):
+    dataset = build_dataset(_cfg(data_dir, success_only=False, max_episodes=2))
+    assert dataset.episodes.tolist() == [0, 1]
+    with pytest.raises(ValueError, match="only 2 episodes"):
+        build_dataset(_cfg(data_dir, max_episodes=3))

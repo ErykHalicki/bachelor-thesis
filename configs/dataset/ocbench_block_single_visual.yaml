@@ -1,0 +1,18 @@
+# block-single with dense state and sparse camera frames, collected by
+# scripts/collect_ocbench_visual.py: front + wrist at 128 px, one frame per 25-step action
+# chunk (plus each episode's final frame), memory-mapped from `-pixels.npy` shards
+defaults:
+  - ocbench_base
+  - _self_
+
+env_name: block-single-task1-v0
+dataset_path: ${oc.env:HOME}/data/ocbench_visual
+cameras: [front, wrist]
+
+# the first 10,500 successful episodes, 500 of them held out: 10k train on
+max_episodes: 10500
+validation_split: 0.047619
+
+normalize:
+  keys: [action, qpos, qvel]
+  method: mean_std

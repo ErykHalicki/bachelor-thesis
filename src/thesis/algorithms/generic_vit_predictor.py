@@ -197,6 +197,7 @@ class GenericViTTrunk(nn.Module):
         attention=None,
         rope=None,
         experts=None,
+        independent_flow_time=False,
     ):
         super().__init__()
         self.depth = depth
@@ -372,11 +373,26 @@ class GenericViTTrunk(nn.Module):
         # AdaLN cond slots: [timestep?] + one per `via: cond` stream
         self.has_flow = bool(noisy_streams)
         self.cond_order = [name for name, _ in cond_sources]
-        self.t_embedder = TimestepEmbedder(model_dim) if self.has_flow else None
+        # independent flow time (UWM): every flow stream carries its own t and its own
+        # embedder. A stream's token_in reads its own embedding; the shared AdaLN slot reads
+        # their sum -- the first layer of an MLP over their concatenation, as UWM's dual
+        # timestep encoder is. One embedder per stream is what lets the trunk tell "action
+        # clean, video noisy" (forward dynamics) from the reverse (inverse dynamics).
+        self.independent_flow_time = bool(independent_flow_time) and self.has_flow
+        self.t_embedder = (TimestepEmbedder(model_dim)
+                           if self.has_flow and not self.independent_flow_time else None)
+        self.t_embedders = nn.ModuleDict(
+            {name: TimestepEmbedder(model_dim) for name, _ in noisy_streams}
+            if self.independent_flow_time else {}
+        )
         self.cond_proj = nn.ModuleDict({
             name: nn.Linear(int(spec["dim"]), model_dim) for name, spec in cond_sources
         })
         self.per_token_cond = bool(cond_sources) or bool(direct_streams)
+        assert not (self.independent_flow_time and self.per_token_cond), (
+            "independent_flow_time does not combine with `via: cond` or direct streams yet: "
+            "their per-token AdaLN slots assume one shared timestep"
+        )
         cond_dim = model_dim * (int(self.has_flow) + len(cond_sources))
 
         # matched on time, so one per-frame action conditions every token of its frame
@@ -547,7 +563,14 @@ class GenericViTTrunk(nn.Module):
         and the timestep slot on its own, which an MLPInputLayer concatenates instead of
         reading the whole cond (None when no stream is flow)."""
         slots, temb = [], None
-        if self.has_flow:
+        if self.independent_flow_time:
+            # a single t (an old call site) means every stream at that time
+            if not isinstance(t, dict):
+                t = t if t is not None else torch.zeros(batch, device=device, dtype=dtype)
+                t = {name: t for name in self.flow_names}
+            temb = {name: self.t_embedders[name](t[name]) for name in t}
+            slots.append(sum(temb.values()))
+        elif self.has_flow:
             if t is None:
                 t = torch.zeros(batch, device=device, dtype=dtype)
             temb = self.t_embedder(t)
@@ -579,7 +602,8 @@ class GenericViTTrunk(nn.Module):
         """
         tokens:       dict with one (B, N_name, dim_name) tensor per token stream; clean streams
                       carry encoded observations, flow streams x_t
-        t:            (B,) flow-matching timestep in [0, 1]; unused when no stream is flow
+        t:            (B,) flow-matching timestep in [0, 1]; unused when no stream is flow.
+                      Under `independent_flow_time`, a dict flow stream -> (B,) instead
         sources:      dict name -> (B, S, dim) tensor or list of `depth` tensors
         source_masks: dict name -> (B, S) bool, True = ignore
         cond:         dict name -> (B, rows, dim) per-frame AdaLN conditioning
@@ -606,7 +630,10 @@ class GenericViTTrunk(nn.Module):
             if name in self.clean_proj:
                 parts.append(self.clean_proj[name](tokens[name]))
             else:
-                slot = temb if name in self.time_concat else c
+                if name in self.time_concat:
+                    slot = temb[name] if isinstance(temb, dict) else temb
+                else:
+                    slot = c
                 parts.append(self.noisy_proj[name](
                     tokens[name], self._slice_cond(slot, self.stream_slices[name])
                 ))
@@ -654,7 +681,7 @@ class GenericViTTrunk(nn.Module):
 
     @torch.no_grad()
     def rollout(self, tokens, sources=None, source_masks=None, cond=None, num_steps=10,
-                cfg_scale=1.0, cfg_drop=(), x0=None, streams=None):
+                cfg_scale=1.0, cfg_drop=(), x0=None, streams=None, clamp=None):
         """One inference pass: Euler-integrate the flow streams from noise (or the A2A
         seeds in `x0`), or -- when nothing is flow -- a single deterministic forward.
         Returns dict name -> prediction. `streams` restricts integration to those
@@ -668,18 +695,20 @@ class GenericViTTrunk(nn.Module):
                                    if streams is None or n in streams}}
             return self(tokens, None, sources, source_masks, cond=cond)
         return self.ode_solve(tokens, sources, source_masks, cond=cond, num_steps=num_steps,
-                              cfg_scale=cfg_scale, cfg_drop=cfg_drop, x0=x0, streams=streams)
+                              cfg_scale=cfg_scale, cfg_drop=cfg_drop, x0=x0, streams=streams,
+                              clamp=clamp)
 
     @torch.no_grad()
     def ode_solve(self, tokens, sources=None, source_masks=None, cond=None, num_steps=10,
-                  cfg_scale=1.0, cfg_drop=(), x0=None, streams=None):
+                  cfg_scale=1.0, cfg_drop=(), x0=None, streams=None, clamp=None):
         """Euler integration under no_grad: the inference path. See `integrate`."""
         return self.integrate(tokens, sources, source_masks, cond=cond, num_steps=num_steps,
-                              cfg_scale=cfg_scale, cfg_drop=cfg_drop, x0=x0, streams=streams)
+                              cfg_scale=cfg_scale, cfg_drop=cfg_drop, x0=x0, streams=streams,
+                              clamp=clamp)
 
     def integrate(self, tokens, sources=None, source_masks=None, cond=None, num_steps=10,
                   cfg_scale=1.0, cfg_drop=(), x0=None, apply_decoders=True,
-                  use_kv_cache=True, streams=None):
+                  use_kv_cache=True, streams=None, clamp=None):
         """Euler integration from noise; returns dict name -> prediction per predicted stream.
 
         tokens holds the clean streams only; noise for flow streams is drawn internally
@@ -696,18 +725,39 @@ class GenericViTTrunk(nn.Module):
         `apply_decoders=False` leaves the endpoint in flow space (the loss decodes it
         itself when it wants raw space), and `use_kv_cache=False` recomputes the
         cross-attention K/V every step rather than reusing step 0's under autograd.
+
+        `clamp` (independent flow time only) pins flow streams instead of integrating them:
+        a dict name -> (t, value). The stream enters every step at time t holding `value`,
+        or fresh noise when value is None, and is left out of the result. That is how one
+        UWM-style model is sampled in each of its modes: a future pinned at noise (t=0)
+        marginalizes it (policy), actions pinned clean (t=1) condition the future on them
+        (forward dynamics), a future pinned clean recovers the actions (inverse dynamics).
         """
         assert tokens, "integrate needs at least one clean stream"
         ref = next(iter(tokens.values()))
         B, device, dtype = ref.shape[0], ref.device, ref.dtype
         sources, x0 = sources or {}, x0 or {}
 
-        flow_active = self.flow_names
+        clamp = dict(clamp or {})
+        assert not clamp or self.independent_flow_time, (
+            "clamping a flow stream needs `independent_flow_time`: with one shared t the "
+            "trunk cannot hold one stream clean while another is denoised"
+        )
+        pinned = {}
+        for name, (t_fixed, value) in clamp.items():
+            assert name in self.flow_names, f"clamp names '{name}', not a flow stream"
+            n = self.stream_slices[name].stop - self.stream_slices[name].start
+            pinned[name] = (
+                torch.full((B,), float(t_fixed), device=device, dtype=dtype),
+                value.to(device=device, dtype=dtype) if value is not None
+                else torch.randn(B, n, self.stream_dims[name], device=device, dtype=dtype),
+            )
+        flow_active = [n for n in self.flow_names if n not in pinned]
         query_active = self.query_names
         if streams is not None:
             unknown = [n for n in streams if n not in self.predict_names]
             assert not unknown, f"streams={unknown} are not predict streams ({self.predict_names})"
-            flow_active = [n for n in self.flow_names if n in streams]
+            flow_active = [n for n in self.flow_names if n in streams and n not in pinned]
             query_active = [n for n in self.query_names if n in streams]
         # value unused (forward reads the embedding); presence marks the stream active
         tokens = {**tokens, **{n: self.query_embed[n] for n in query_active}}
@@ -730,18 +780,21 @@ class GenericViTTrunk(nn.Module):
 
         dt = 1.0 / num_steps
         out = {}
+        held = {name: value for name, (_, value) in pinned.items()}
         for step in range(num_steps):
             t = torch.full((B,), step * dt, device=device, dtype=dtype)
-            out = self({**tokens, **x}, t, sources, source_masks, cond=cond,
+            if self.independent_flow_time:
+                t = {**{name: t for name in x}, **{name: tp for name, (tp, _) in pinned.items()}}
+            out = self({**tokens, **x, **held}, t, sources, source_masks, cond=cond,
                        use_kv_cache=use_kv_cache)
             v = out
             if use_cfg:
-                u = self({**tokens, **x}, t, uncond_sources, source_masks, cond=cond,
+                u = self({**tokens, **x, **held}, t, uncond_sources, source_masks, cond=cond,
                          use_kv_cache=False)
                 v = {name: u[name] + cfg_scale * (v[name] - u[name]) for name in v}
             x = {name: x[name] + v[name] * dt for name in x}
 
-        final = {**{n: out[n] for n in out if n not in x
+        final = {**{n: out[n] for n in out if n not in x and n not in pinned
                     and (streams is None or n in streams)}, **x}
         if apply_decoders:
             for name in x:
@@ -774,6 +827,10 @@ class GenericViTPredictor(PredictiveModel):
         self.num_flow_steps = int(cfg.get("num_flow_steps", 1))
         self.cfg_scale = float(cfg.get("cfg_scale", 1.0))
         self.cfg_drop = tuple(cfg.get("cfg_drop", ()) or ())
+        # `flow_time: {independent: true, ...}` -- UWM's training scheme, see _forward_train
+        self.flow_time = dict(cfg.get("flow_time") or {})
+        clamp = cfg.get("inference_clamp")
+        self.inference_clamp = {str(n): float(t) for n, t in dict(clamp).items()} if clamp else None
         inf = cfg.get("inference_streams")
         self.inference_streams = [str(n) for n in inf] if inf else None
         if self.inference_streams:
@@ -784,7 +841,9 @@ class GenericViTPredictor(PredictiveModel):
             )
 
     def _build_predictor(self, cfg):
-        trunk = GenericViTTrunk(cfg.conditioning, cfg.predict, **cfg.model)
+        independent = bool((cfg.get("flow_time") or {}).get("independent", False))
+        trunk = GenericViTTrunk(cfg.conditioning, cfg.predict,
+                                independent_flow_time=independent, **cfg.model)
         for name, spec in cfg.predict.items():
             dec = spec.get("decoder")
             if dec:
@@ -796,7 +855,16 @@ class GenericViTPredictor(PredictiveModel):
         seeds = seeds or {}
         flow = {n: targets[n] for n in self.predictor.flow_names}
         t, x_t, target = None, {}, {}
-        if flow:
+        clean_rows = {}
+        if flow and self.predictor.independent_flow_time:
+            t = self._sample_independent_time(flow)
+            x0 = {n: (seeds[n] if seeds.get(n) is not None else torch.randn_like(v))
+                  for n, v in flow.items()}
+            x_t = {n: (1 - t[n].view(-1, 1, 1)) * x0[n] + t[n].view(-1, 1, 1) * flow[n]
+                   for n in flow}
+            target.update({n: flow[n] - x0[n] for n in flow})
+            clean_rows = {n: t[n] >= 1.0 for n in flow}
+        elif flow:
             ref = next(iter(flow.values()))
             t = sample_flow_time(ref.shape[0], ref.device)
             tb = t.view(-1, 1, 1)
@@ -809,7 +877,37 @@ class GenericViTPredictor(PredictiveModel):
 
         queries = {n: self.predictor.query_embed[n] for n in self.predictor.query_names}
         pred = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond)
+        for n, rows in clean_rows.items():
+            # a stream handed in clean is conditioning on that row, not a prediction: its
+            # velocity target needs the x0 the clean input no longer carries, so the row
+            # scores zero rather than noise
+            target[n] = torch.where(rows.view(-1, 1, 1), pred[n].detach(), target[n])
         return pred, target
+
+    def _sample_independent_time(self, flow):
+        """One t per flow stream per row (UWM). Each draw follows the usual schedule, and
+        then with `noise_prob` is pinned to t=0 and with `clean_prob` to t=1 -- the two
+        endpoints every inference mode sets a stream to (a future marginalized at noise,
+        or actions / future handed in clean), which a continuous draw would almost never
+        visit. Both may be a float for every stream or a {stream: p} map.
+        """
+        cfg = self.flow_time
+        ref = next(iter(flow.values()))
+        B, device = ref.shape[0], ref.device
+
+        def prob(key, name):
+            value = cfg.get(key, 0.0)
+            return float(value.get(name, 0.0) if hasattr(value, "get") else value)
+
+        out = {}
+        for name in flow:
+            t = sample_flow_time(B, device)
+            u = torch.rand(B, device=device)
+            p_noise, p_clean = prob("noise_prob", name), prob("clean_prob", name)
+            t = torch.where(u < p_noise, torch.zeros_like(t), t)
+            t = torch.where((u >= p_noise) & (u < p_noise + p_clean), torch.ones_like(t), t)
+            out[name] = t
+        return out
 
     def _forward_integrate(self, clean, sources, cond, seeds, num_steps):
         # deliberately unguided: the term supervises the unguided endpoint, and a guided
@@ -820,11 +918,14 @@ class GenericViTPredictor(PredictiveModel):
         )
         return {name: out[name] for name in self.predictor.flow_names}
 
-    def predict(self, obs, streams=None):
+    def predict(self, obs, streams=None, clamp=None):
         """Integrate the flow streams. `streams` (default: cfg `inference_streams`,
         else all) restricts integration to those predict streams; only the clean token
         streams they attend are encoded, so the batch needs no rows for the rest --
-        e.g. a policy-only pass on a selfwam arm needs no future action chunk."""
+        e.g. a policy-only pass on a selfwam arm needs no future action chunk.
+
+        `clamp` (default: cfg `inference_clamp`) picks a UWM sampling mode by pinning
+        flow streams at noise (0) or clean (1); see `_clamp`."""
         self.eval()
         streams = list(streams) if streams is not None else self.inference_streams
         with torch.no_grad():
@@ -841,8 +942,23 @@ class GenericViTPredictor(PredictiveModel):
             return self.predictor.rollout(
                 clean, sources, cond=cond, num_steps=self.num_flow_steps,
                 cfg_scale=self.cfg_scale, cfg_drop=self.cfg_drop, x0=seeds,
-                streams=streams,
+                streams=streams, clamp=self._clamp(obs, clamp),
             )
+
+    def _clamp(self, obs, clamp=None):
+        """`{stream: t}` (the call's, else cfg `inference_clamp`) -> the trunk's
+        `{stream: (t, value)}`. A stream pinned at t=0 is held at fresh noise; one pinned
+        clean (t=1) is encoded from its own window in `obs`, which must then carry it."""
+        clamp = clamp if clamp is not None else self.inference_clamp
+        if not clamp:
+            return None
+        out = {}
+        for name, t in clamp.items():
+            value = None
+            if float(t) >= 1.0:
+                value = self._encode(name, self.predict_spec[name], obs)
+            out[name] = (float(t), value)
+        return out
 
     def _act_stream(self):
         """The conditioning stream carrying the action: its name, the batch field it reads,

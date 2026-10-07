@@ -1,0 +1,29 @@
+# @package _global_
+# A UWM-style flow transformer (configs/algorithm/uwm_ocbench.yaml) on 10k successful
+# block-single demos with front + wrist frames, scored by policy-mode MJWarp rollouts:
+#
+#   python main.py run=uwm_ocbench_block_single
+defaults:
+  - override /dataset: ocbench_block_single_visual
+  - override /algorithm: uwm_ocbench
+  - override /eval: ocbench
+
+best_metric: success_rate
+best_mode: max
+
+experiment:
+  batch_size: 256
+  effective_batch: null
+  max_steps: 200000
+  eval_every: 2500
+  save_every: 2500
+  lr_warmup_steps: 1000
+  optimizer:
+    lr: 1.0e-4
+
+# frames come from a state env, rendered on the steps the dataset stored frames: every
+# 25 steps, which is also when the policy replans (execute_len = chunk_len = 25)
+eval:
+  pixel_cameras: [front, ur5e/wrist]
+  pixel_size: 128
+  pixel_interval: 25

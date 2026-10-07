@@ -23,12 +23,14 @@ class FakeEnv:
     def __init__(self, num_envs):
         self.num_envs = num_envs
         self.actions = []
+        self.renders = []
         self.closed = False
 
     def reset(self, seeds):
         self.seeds = np.asarray(seeds)
         self.t = 0
-        return np.repeat(self.seeds[:, None].astype(np.float64), 3, axis=1), {}
+        info = {"qpos": np.zeros((len(self.seeds), 4)), "qvel": np.zeros((len(self.seeds), 2))}
+        return np.repeat(self.seeds[:, None].astype(np.float64), 3, axis=1), info
 
     def step(self, actions):
         self.actions.append(np.array(actions))
@@ -37,6 +39,10 @@ class FakeEnv:
         obs = np.repeat(self.seeds[:, None].astype(np.float64), 3, axis=1)
         info = {"success": success, "healthy": np.ones(self.num_envs, dtype=bool)}
         return obs, np.zeros(self.num_envs), success, np.zeros(self.num_envs, bool), info
+
+    def get_pixel_observation(self, worlds):
+        self.renders.append((self.t, list(worlds)))
+        return np.full((len(worlds), 2, 4, 5, 3), self.t, dtype=np.uint8)
 
     def render_world(self, world):
         return np.zeros((4, 5, 3), dtype=np.uint8)
@@ -50,6 +56,7 @@ class StubBatch:
 
     def __init__(self):
         self.resets = 0
+        self.frames = []
 
     def reset(self, hold_action=None):
         self.resets += 1
@@ -57,6 +64,7 @@ class StubBatch:
 
     def step(self, frames):
         assert all(frame["observation.state"].dtype == np.float32 for frame in frames)
+        self.frames.append(frames)
         return np.full((len(frames), 7), 5.0, dtype=np.float32)
 
 
@@ -73,8 +81,9 @@ def _run(episodes=5, num_envs=2, **overrides):
     })
     envs = []
 
-    def make_env(name, n):
+    def make_env(name, n, **kwargs):
         envs.append(FakeEnv(n))
+        envs[-1].kwargs = kwargs
         return envs[-1]
 
     backend = OCBenchEval(cfg, make_env=make_env)
@@ -134,3 +143,21 @@ def test_visual_observations_split_into_camera_columns():
     ]
     assert frames[1]["observation.images.side"].shape == (4, 5, 3)
     assert np.all(frames[1]["observation.images.side"] == 7)
+
+
+def test_cameras_render_every_interval_and_hold_in_between():
+    result, env, batch = _run(
+        episodes=4, num_envs=4, pixel_cameras=["front", "ur5e/wrist"], pixel_size=4,
+        pixel_interval=2, cameras=["front", "wrist"],
+    )
+    assert env.kwargs == {"width": 4, "height": 4, "pixel_cameras": ("front", "ur5e/wrist")}
+    # rendered before steps 1, 3 and 5 (env time 0, 2, 4) -- the last only for worlds
+    # still running, and solved worlds finish on step 3
+    solved = [_solves(s) for s in env.seeds]
+    running = [w for w, s in enumerate(solved) if not s]
+    assert env.renders[:2] == [(0, [0, 1, 2, 3]), (2, [0, 1, 2, 3])]
+    assert env.renders[2:3] == ([(4, running)] if running else [])
+    held = [frames[0]["observation.images.wrist"][0, 0, 0] for frames in batch.frames[:4]]
+    assert held == [0, 0, 2, 2]
+    first = batch.frames[0][0]
+    assert first["qpos"].shape == (4,) and first["qvel"].dtype == np.float32

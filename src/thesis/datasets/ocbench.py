@@ -1,16 +1,23 @@
 """OCBench scripted demonstrations (github.com/seohongpark/ocbench) as a dataset backend.
 
 OCBench ships its data as `.npz` files of flat transition arrays: `actions`, `rewards`,
-`masks`, `terminals` hold one row per control step, `observations` one row per step plus
-each episode's final observation, and `terminals` marks every episode's last step. This
-backend serves them in the same windowed batch format as the lerobot backend, so a model
-cannot tell which one it is reading.
+`masks`, `terminals` (and, from its MJWarp collector, `qpos`/`qvel`) hold one row per
+control step, and `terminals` marks every episode's last step. `observations` holds one
+row per stored observation: every step plus each episode's final one for a dense dataset,
+or -- with `observation_interval` K > 1 -- only steps 0, K, 2K, ... plus the final one.
+This backend serves them in the same windowed batch format as the lerobot backend, so a
+model cannot tell which one it is reading.
 
 Columns, named like the lerobot ones so the same algorithm configs read both:
 
-    observation.state            the state observation vector (state envs)
-    observation.images.<camera>  one camera of a visual env, (C, H, W) uint8 per step
+    observation.state            the state observation vector (dense state datasets)
+    observation.images.<camera>  one camera of a visual dataset, (C, H, W) uint8 per frame
+    qpos, qvel                   the simulator state before each action, when recorded
     action                       the 7-d joint-delta action OCBench envs take
+
+A visual shard may keep its frames beside it in `<shard>-pixels.npy` instead of inside the
+`.npz` (scripts/collect_ocbench_visual.py writes them that way). That file is memory-mapped
+rather than loaded, since tens of GB of frames do not fit in RAM.
 """
 
 import glob
@@ -26,6 +33,8 @@ from .lerobot import split_episodes
 STATE_COLUMN = "observation.state"
 ACTION_COLUMN = "action"
 IMAGE_PREFIX = "observation.images"
+# per-step columns: one row per action, none for the observation after the last one
+STEP_COLUMNS = {ACTION_COLUMN: "actions", "qpos": "qpos", "qvel": "qvel"}
 # the camera order of a visual env's `pixel_cameras`, with `ur5e/wrist` shortened
 DEFAULT_CAMERAS = ("front", "side", "wrist")
 
@@ -56,37 +65,44 @@ def resolve_paths(cfg):
     return paths[: int(num_shards)] if num_shards is not None else paths
 
 
+def pixels_path(path):
+    return str(path)[: -len(".npz")] + "-pixels.npy"
+
+
 def episode_table(path):
-    """(lengths, successes) of every episode in one file, read off its small columns.
+    """(lengths, successes, observation_interval) of one file, read off its small columns.
 
     An episode succeeded when any of its rewards is 1: OCBench pays exactly 1 on the step
     the task is solved and 0 everywhere else, so a time-limit failure is all zeros.
     """
     with np.load(path) as data:
         interval = int(data["observation_interval"])
-        if interval != 1:
-            raise ValueError(
-                f"{path} stores sparse observations (observation_interval={interval}); "
-                f"only dense datasets are supported"
-            )
         terminals = data["terminals"]
         rewards = data["rewards"]
     ends = np.flatnonzero(terminals) + 1
     starts = np.concatenate([[0], ends[:-1]])
     successes = np.array([np.any(rewards[s:e] == 1) for s, e in zip(starts, ends)], dtype=bool)
-    return ends - starts, successes
+    return ends - starts, successes, interval
+
+
+def observation_rows(lengths, interval):
+    """Stored observation rows per episode: steps 0, K, 2K, ... before the last action,
+    plus the observation the last action produced."""
+    return (lengths + interval - 1) // interval + 1
 
 
 class OCBenchSource(BaseSource):
     """OCBench demonstrations, windowed by the temporal index spec exactly like
     LeRobotSource: each spec entry reads the field its `from` names over a window of step
     offsets around a sampled decision point t=0, a field read by several entries carries
-    the sorted union of their windows, and `"last"` appends the episode's final frame.
+    the sorted union of their windows, and `"last"` appends the episode's final row.
 
-    A decision point is a step t of an episode of L actions. An action offset clamps into
-    [0, L-1]; an observation offset into [0, L], since every episode stores the observation
-    its last action produced. `"last"` is that final observation for observation fields and
-    the last action for the action field.
+    A decision point is a step t of an episode of L actions. A per-step column (action,
+    qpos, qvel) clamps its offsets into [0, L-1] and its `"last"` is step L-1; an
+    observation column clamps into [0, L] and its `"last"` is the observation the last
+    action produced. A sparse visual dataset stores frames every K steps only, so when any
+    field reads a camera, decision points are the multiples of K and every camera offset
+    must be one too -- a window then lands on stored frames exactly.
 
     Config knobs:
       env_name       OCBench environment the data comes from (and the eval rolls out in).
@@ -99,14 +115,16 @@ class OCBenchSource(BaseSource):
                      12% of block-single episodes run out the clock correcting them.
       episodes       episode indices to keep, counted over every file in order before the
                      success filter; null keeps all.
+      max_episodes   keep only the first N episodes left after those filters (and before
+                     the split), so a dataset collected past a target size trains at it.
       validation_split / validation_split_seed
                      as on the lerobot backend: a seeded shuffle of the kept episodes.
       columns        `{from_key: column}` remap; default identity.
       cameras        camera names for a visual dataset's camera axis, in env order.
       image_size     `[H, W]` to resize camera frames to; null keeps native size.
       return_uint8   uint8 [0,255] frames (default); false gives float [0,1].
-      drop_boundary  drop decision points whose window runs past the last action
-                     (default true). Offsets before an episode clamp onto its first step.
+      drop_boundary  drop decision points whose window runs past the episode (default
+                     true). Offsets before an episode clamp onto its first step.
     """
 
     def __init__(self, cfg, split=None):
@@ -123,14 +141,25 @@ class OCBenchSource(BaseSource):
 
         paths = resolve_paths(cfg)
         tables = [episode_table(p) for p in paths]
-        lengths = np.concatenate([lengths for lengths, _ in tables])
-        successes = np.concatenate([successes for _, successes in tables])
+        intervals = {interval for _, _, interval in tables}
+        if len(intervals) != 1:
+            raise ValueError(f"{paths} mix observation intervals {sorted(intervals)}")
+        self._interval = intervals.pop()
+        lengths = np.concatenate([lengths for lengths, _, _ in tables])
+        successes = np.concatenate([successes for _, successes, _ in tables])
         keep = np.arange(len(lengths))
         if cfg.get("success_only", True):
             keep = keep[successes[keep]]
         requested = cfg.get("episodes")
         if requested is not None:
             keep = np.array(sorted(set(keep.tolist()) & {int(e) for e in requested}), dtype=int)
+        if cfg.get("max_episodes") is not None:
+            if len(keep) < int(cfg.max_episodes):
+                raise ValueError(
+                    f"max_episodes={cfg.max_episodes} but only {len(keep)} episodes of "
+                    f"{paths} pass the success/episode filters"
+                )
+            keep = keep[: int(cfg.max_episodes)]
         if not len(keep):
             raise ValueError(f"no episodes left of {paths} after the success/episode filters")
         if split is not None:
@@ -143,22 +172,7 @@ class OCBenchSource(BaseSource):
         self.episodes = keep
         self.num_successes = int(successes[keep].sum())
 
-        with np.load(paths[0]) as data:
-            ob_shape = data["observations"].shape
-            ob_dtype = data["observations"].dtype
-        visual = ob_dtype == np.uint8
-        if visual and len(ob_shape) == 4:
-            ob_shape = (ob_shape[0], 1, *ob_shape[1:])
-        if visual and len(cameras) < ob_shape[1]:
-            raise ValueError(
-                f"the dataset holds {ob_shape[1]} cameras but `cameras:` names {cameras}"
-            )
-        self._camera_of = (
-            {f"{IMAGE_PREFIX}.{name}": i for i, name in enumerate(cameras[: ob_shape[1]])}
-            if visual else {}
-        )
-        available = {ACTION_COLUMN, *(self._camera_of or (STATE_COLUMN,))}
-
+        available = self._columns_of(paths[0], cameras)
         windows, has_last, field_to_col = {}, {}, {}
         entries = {**cfg.conditioning, **cfg.predict, **flow_source_entries(cfg.predict)}
         for key, spec in entries.items():
@@ -179,12 +193,21 @@ class OCBenchSource(BaseSource):
         self._field_to_col = field_to_col
         self.provided_modalities = set(field_to_col) | set(field_to_col.values())
 
-        self._load(paths, tables, need_obs=any(c != ACTION_COLUMN for c in field_to_col.values()))
+        visual = {f for f, c in field_to_col.items() if c in self._camera_of}
+        self._stride = self._interval if visual else 1
+        for field in visual:
+            off = [int(o) for o in self._windows[field] if o % self._interval]
+            if off:
+                raise ValueError(
+                    f"field '{field}' reads camera offsets {off}, but frames are stored "
+                    f"every {self._interval} steps: every camera offset must be a multiple"
+                )
 
-        # an observation window may reach one row further than an action window: the
-        # observation the last action produced
+        self._load(paths, tables, set(field_to_col.values()))
+
+        # a per-step column reaches step L-1 at most; an observation reaches L
         ahead = max(
-            [0] + [int(w.max()) - (self._field_to_col[f] != ACTION_COLUMN)
+            [0] + [int(w.max()) - (self._field_to_col[f] not in STEP_COLUMNS)
                    for f, w in self._windows.items() if len(w)]
         )
         drop_boundary = cfg.get("drop_boundary", True)
@@ -192,78 +215,125 @@ class OCBenchSource(BaseSource):
             [
                 (ordinal, t)
                 for ordinal, length in enumerate(self._lengths)
-                for t in range(length - ahead if drop_boundary else length)
+                for t in range(0, length - ahead if drop_boundary else length, self._stride)
             ],
             dtype=np.int64,
         ).reshape(-1, 2)
 
-    def _load(self, paths, tables, need_obs):
+    def _columns_of(self, path, cameras):
+        """The columns a file serves, and (as a side effect) the camera -> axis map."""
+        frames = pixels_path(path)
+        with np.load(path) as data:
+            keys = set(data.files)
+            ob = None
+            if "observations" in keys:
+                # the header alone: a visual file's frames are too big to load to look
+                with data.zip.open("observations.npy") as header:
+                    version = np.lib.format.read_magic(header)
+                    read = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                            else np.lib.format.read_array_header_2_0)
+                    shape, _, dtype = read(header)
+                ob = (shape, dtype)
+        if os.path.exists(frames):
+            arr = np.load(frames, mmap_mode="r")
+            ob = (arr.shape, arr.dtype)
+        available = {col for col, key in STEP_COLUMNS.items() if key in keys}
+        self._camera_of = {}
+        if ob is not None and ob[1] == np.uint8:
+            n_cams = ob[0][1] if len(ob[0]) == 5 else 1
+            if len(cameras) < n_cams:
+                raise ValueError(f"the dataset holds {n_cams} cameras but `cameras:` names {cameras}")
+            self._camera_of = {f"{IMAGE_PREFIX}.{n}": i for i, n in enumerate(cameras[:n_cams])}
+            available |= set(self._camera_of)
+        elif ob is not None:
+            if self._interval != 1:
+                raise ValueError(f"{path}: sparse state observations are not supported")
+            available.add(STATE_COLUMN)
+        return available
+
+    def _load(self, paths, tables, cols):
         """Pull the kept episodes' rows out of every file, one array at a time.
 
-        Observations are skipped entirely when no field reads them, which is most of the
-        memory of a visual dataset.
+        Per-step columns and state observations are copied into RAM; camera frames stay
+        where they are -- a memory-mapped `-pixels.npy`, or the in-RAM array of a file that
+        keeps them inline -- addressed per episode by (file, first row).
         """
         kept = set(self.episodes.tolist())
-        actions, observations, lengths = [], [], []
+        step = {col: [] for col in cols if col in STEP_COLUMNS}
+        states, lengths, self._frames, frame_refs = [], [], [], []
+        need_frames = any(c in self._camera_of for c in cols)
         first = 0
-        for path, (file_lengths, _) in zip(paths, tables):
+        for path, (file_lengths, _, _) in zip(paths, tables):
             ends = np.cumsum(file_lengths)
             starts = ends - file_lengths
+            ob_rows = observation_rows(file_lengths, self._interval)
+            ob_starts = np.concatenate([[0], np.cumsum(ob_rows)[:-1]])
             local = [e for e in range(len(file_lengths)) if first + e in kept]
             first += len(file_lengths)
             if not local:
                 continue
             with np.load(path) as data:
-                file_actions = data["actions"]
-                actions.extend(file_actions[starts[e]:ends[e]].astype(np.float32) for e in local)
-                del file_actions
-                if need_obs:
-                    file_obs = data["observations"]
-                    # one extra observation per episode: the one its last action produced
-                    for e in local:
-                        rows = file_obs[starts[e] + e : ends[e] + e + 1]
-                        observations.append(rows if rows.dtype == np.uint8 else rows.astype(np.float32))
-                    del file_obs
+                for col in step:
+                    values = data[STEP_COLUMNS[col]]
+                    step[col].extend(values[starts[e]:ends[e]].astype(np.float32) for e in local)
+                    del values
+                if STATE_COLUMN in cols:
+                    obs = data["observations"]
+                    states.extend(obs[ob_starts[e]:ob_starts[e] + ob_rows[e]].astype(np.float32)
+                                  for e in local)
+                    del obs
+                if need_frames:
+                    frames = (np.load(pixels_path(path), mmap_mode="r")
+                              if os.path.exists(pixels_path(path)) else data["observations"])
+                    if frames.ndim == 4:
+                        frames = frames[:, None]
+                    frame_refs.extend((len(self._frames), int(ob_starts[e])) for e in local)
+                    self._frames.append(frames)
             lengths.extend(int(file_lengths[e]) for e in local)
         self._lengths = np.asarray(lengths, dtype=np.int64)
         self._act_starts = np.concatenate([[0], np.cumsum(self._lengths)[:-1]])
         self._obs_starts = self._act_starts + np.arange(len(lengths))
-        self._actions = np.concatenate(actions)
-        self._observations = np.concatenate(observations) if need_obs else None
-        if self._observations is not None and self._observations.dtype == np.uint8 \
-                and self._observations.ndim == 4:
-            self._observations = self._observations[:, None]
+        self._step = {col: np.concatenate(v) for col, v in step.items()}
+        self._states = np.concatenate(states) if states else None
+        self._frame_refs = np.asarray(frame_refs, dtype=np.int64).reshape(-1, 2)
 
     def __len__(self):
         return len(self._index)
 
-    def _rows(self, field, ordinal, t):
-        """Absolute row indices of one field's window (plus its `"last"` row)."""
+    def _offsets(self, field, ordinal, t):
+        """Episode-local steps of one field's window (plus its `"last"` step)."""
         length = int(self._lengths[ordinal])
-        is_action = self._field_to_col[field] == ACTION_COLUMN
-        hi = length - 1 if is_action else length
-        start = self._act_starts[ordinal] if is_action else self._obs_starts[ordinal]
-        rows = np.clip(t + self._windows[field], 0, hi)
+        hi = length - 1 if self._field_to_col[field] in STEP_COLUMNS else length
+        steps = np.clip(t + self._windows[field], 0, hi)
         if field in self._has_last:
-            rows = np.append(rows, hi)
-        return start + rows
+            steps = np.append(steps, hi)
+        return steps
 
     def __getitem__(self, idx):
         ordinal, t = (int(v) for v in self._index[idx])
         batch = {}
         for field, col in self._field_to_col.items():
-            rows = self._rows(field, ordinal, t)
-            if col == ACTION_COLUMN:
-                batch[field] = torch.from_numpy(self._actions[rows])
+            steps = self._offsets(field, ordinal, t)
+            if col in STEP_COLUMNS:
+                batch[field] = torch.from_numpy(self._step[col][self._act_starts[ordinal] + steps])
             elif col == STATE_COLUMN:
-                batch[field] = torch.from_numpy(self._observations[rows])
+                batch[field] = torch.from_numpy(self._states[self._obs_starts[ordinal] + steps])
             else:
-                frames = torch.from_numpy(self._observations[rows, self._camera_of[col]])
-                frames = frames.permute(0, 3, 1, 2).contiguous()
-                if self._image_size:
-                    frames = self._resize(frames)
-                batch[field] = frames if self._return_uint8 else frames.float() / 255.0
+                batch[field] = self._read_frames(col, ordinal, steps)
         return batch
+
+    def _read_frames(self, col, ordinal, steps):
+        """Frames at episode-local steps: step s < L is stored row s // K, and step L --
+        the observation after the last action -- is the episode's final row."""
+        length = int(self._lengths[ordinal])
+        rows = np.where(steps >= length, observation_rows(length, self._interval) - 1,
+                        steps // self._interval)
+        file, first = self._frame_refs[ordinal]
+        frames = np.ascontiguousarray(self._frames[file][first + rows, self._camera_of[col]])
+        frames = torch.from_numpy(frames).permute(0, 3, 1, 2).contiguous()
+        if self._image_size:
+            frames = self._resize(frames)
+        return frames if self._return_uint8 else frames.float() / 255.0
 
     def _resize(self, tensor):
         if tuple(tensor.shape[-2:]) == self._image_size:
@@ -278,13 +348,13 @@ class OCBenchSource(BaseSource):
         out = {}
         for key in keys:
             col = self._field_to_col.get(key, self._columns.get(key, key))
-            if col == ACTION_COLUMN:
-                out[key] = self._actions
-            elif col == STATE_COLUMN and self._observations is not None:
+            if col in self._step:
+                out[key] = self._step[col]
+            elif col == STATE_COLUMN and self._states is not None:
                 steps = np.concatenate([
                     np.arange(s, s + n) for s, n in zip(self._obs_starts, self._lengths)
                 ])
-                out[key] = self._observations[steps]
+                out[key] = self._states[steps]
             else:
                 return None
         return out or None

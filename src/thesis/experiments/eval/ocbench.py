@@ -8,6 +8,13 @@ time by itself, so the cap lives here, defaulting to the env's registered limit.
 
 Episodes are seeded per episode index, not per world, so a run scores the same initial
 states whatever `num_envs` is.
+
+A policy trained on a sparse visual dataset reads camera frames that the dataset stored
+once every K steps. The eval matches that by rolling out a STATE env and rendering its
+cameras only every `pixel_interval` steps (`pixel_cameras` / `pixel_size` set the render),
+holding each frame in between -- with `execute_len` = K the policy replans exactly on the
+rendered steps, so it sees frames spaced as in training. Rendering every step would cost
+a CPU render per world per step.
 """
 
 import time
@@ -19,6 +26,8 @@ from .chunking import BatchDriver, RemoteDriver, make_driver
 
 STATE_COLUMN = "observation.state"
 IMAGE_PREFIX = "observation.images"
+# simulator state columns, read off the env's info dict like the collector records them
+INFO_COLUMNS = ("qpos", "qvel")
 DEFAULT_CAMERAS = ("front", "side", "wrist")
 
 
@@ -27,27 +36,39 @@ def episode_seed(seed, episode):
     return np.random.SeedSequence([int(seed), int(episode)]).generate_state(1, dtype=np.uint32)[0]
 
 
-def observation_to_frames(observation, cameras):
+def observation_to_frames(observation, cameras, info=None, pixels=None):
     """A batched env observation -> one dataset-keyed frame per world.
 
     A state env yields `(N, obs_dim)` floats; a visual env `(N, cameras, H, W, 3)` uint8,
-    each camera served as its own column the way the dataset backend serves them.
+    each camera served as its own column the way the dataset backend serves them. `info`
+    adds the `qpos`/`qvel` columns, and `pixels` -- frames rendered from a state env --
+    the camera columns.
     """
     observation = np.asarray(observation)
     if observation.dtype != np.uint8:
-        return [{STATE_COLUMN: row.astype(np.float32)} for row in observation]
-    if observation.ndim == 4:
-        observation = observation[:, None]
-    return [
-        {f"{IMAGE_PREFIX}.{name}": np.ascontiguousarray(world[i]) for i, name in enumerate(cameras)}
-        for world in observation
-    ]
+        frames = [{STATE_COLUMN: row.astype(np.float32)} for row in observation]
+    else:
+        if observation.ndim == 4:
+            observation = observation[:, None]
+        frames = [
+            {f"{IMAGE_PREFIX}.{name}": np.ascontiguousarray(world[i])
+             for i, name in enumerate(cameras)}
+            for world in observation
+        ]
+    for col in INFO_COLUMNS:
+        if info is not None and col in info:
+            for frame, row in zip(frames, np.asarray(info[col])):
+                frame[col] = row.astype(np.float32)
+    if pixels is not None:
+        for frame, world in zip(frames, pixels):
+            frame.update({f"{IMAGE_PREFIX}.{name}": world[i] for i, name in enumerate(cameras)})
+    return frames
 
 
-def _make_env(env_name, num_envs):
+def _make_env(env_name, num_envs, **kwargs):
     import ocbench
 
-    return ocbench.make(env_name, nworld=num_envs)
+    return ocbench.make(env_name, nworld=num_envs, **kwargs)
 
 
 class _SerialBatch:
@@ -75,6 +96,10 @@ class OCBenchEval:
       seed               the base of every episode's reset seed.
       cameras            camera names for a visual env's camera axis, in env order.
       max_videos         episodes recorded as videos; video_stride keeps every Nth step.
+      pixel_cameras      env camera names to render from a state env (e.g. front,
+                         ur5e/wrist), served under `cameras` names; null renders nothing.
+      pixel_size         their square render size.
+      pixel_interval     render every this many steps, holding frames in between.
       holdout            also report the held-out loss (needs dataset.validation_split).
     plus the ChunkDriver knobs every rollout backend takes (execute_len, num_flow_steps,
     cfg_scale, image_size, columns, server, ...).
@@ -97,18 +122,37 @@ class OCBenchEval:
             )
         return max_steps
 
-    def _obs_features(self, env):
+    def _render_kwargs(self):
+        cams = self.cfg.get("pixel_cameras")
+        if not cams:
+            return {}
+        size = int(self.cfg.get("pixel_size", 128))
+        return {"width": size, "height": size, "pixel_cameras": tuple(str(c) for c in cams)}
+
+    def _obs_features(self, env, info):
         space = env.single_observation_space
+        features = {}
         if space.dtype != np.uint8:
             dim = int(space.shape[-1])
-            return {STATE_COLUMN: {"dtype": "float32", "shape": (dim,),
-                                   "names": [f"state.{i}" for i in range(dim)]}}
-        shape = tuple(space.shape)
-        if len(shape) == 3:
-            shape = (1, *shape)
-        cameras = self._cameras(shape[0])
-        return {f"{IMAGE_PREFIX}.{name}": {"dtype": "video", "shape": shape[1:], "names": None}
-                for name in cameras}
+            features[STATE_COLUMN] = {"dtype": "float32", "shape": (dim,),
+                                      "names": [f"state.{i}" for i in range(dim)]}
+            n_cams = len(self.cfg.get("pixel_cameras") or ())
+            size = int(self.cfg.get("pixel_size", 128))
+            image_shape = (size, size, 3)
+        else:
+            shape = tuple(space.shape)
+            if len(shape) == 3:
+                shape = (1, *shape)
+            n_cams, image_shape = shape[0], shape[1:]
+        for col in INFO_COLUMNS:
+            if col in info:
+                dim = int(np.asarray(info[col]).shape[-1])
+                features[col] = {"dtype": "float32", "shape": (dim,),
+                                 "names": [f"{col}.{i}" for i in range(dim)]}
+        for name in self._cameras(n_cams) if n_cams else ():
+            features[f"{IMAGE_PREFIX}.{name}"] = {"dtype": "video", "shape": image_shape,
+                                                  "names": None}
+        return features
 
     def _cameras(self, count):
         names = [str(c) for c in (self.cfg.get("cameras") or DEFAULT_CAMERAS)]
@@ -139,11 +183,12 @@ class OCBenchEval:
 
         if model is not None:
             model.eval()
-        env = self._make_env(str(cfg.env_name), num_envs)
+        env = self._make_env(str(cfg.env_name), num_envs, **self._render_kwargs())
         rows, videos = [], {}
         driver = None
         try:
-            obs_features = self._obs_features(env)
+            _, info = env.reset(seeds=np.zeros(num_envs, dtype=np.uint32))
+            obs_features = self._obs_features(env, info)
             cameras = [c.removeprefix(f"{IMAGE_PREFIX}.") for c in obs_features
                        if c.startswith(IMAGE_PREFIX)]
             driver, batch = self._make_driver(model, obs_features, num_envs)
@@ -175,7 +220,10 @@ class OCBenchEval:
         seeds = np.array(
             [episode_seed(seed, start + min(w, live - 1)) for w in range(num_envs)], dtype=np.uint32
         )
-        observation, _ = env.reset(seeds=seeds)
+        observation, info = env.reset(seeds=seeds)
+        render = bool(self.cfg.get("pixel_cameras"))
+        render_every = max(1, int(cfg.get("pixel_interval", 1)))
+        pixels = None
         # OCBench actions are joint deltas, so zero holds the arm where it stands
         batch.reset(np.zeros(action_dim, dtype=np.float32))
 
@@ -187,7 +235,17 @@ class OCBenchEval:
         clips = {w: [env.render_world(w).copy()] for w in recording}
 
         for tick in range(1, max_steps + 1):
-            actions = batch.step(observation_to_frames(observation, cameras))
+            if render and (tick - 1) % render_every == 0:
+                # finished worlds are parked; re-rendering them would only cost time
+                live_worlds = np.flatnonzero(~done)
+                if len(live_worlds):
+                    fresh = env.get_pixel_observation(live_worlds)
+                    # a new buffer per render, never an update in place: the driver's
+                    # history holds views of the old one, which must keep the old frames
+                    pixels = (np.zeros((num_envs, *fresh.shape[1:]), dtype=np.uint8)
+                              if pixels is None else pixels.copy())
+                    pixels[live_worlds] = fresh
+            actions = batch.step(observation_to_frames(observation, cameras, info, pixels))
             actions = np.clip(np.asarray(actions, dtype=np.float32), -1.0, 1.0)
             actions[done] = 0.0
             observation, _, terminated, _, info = env.step(actions)

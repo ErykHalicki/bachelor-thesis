@@ -8,3 +8,6 @@
 [submodule "external/vjepa2"]
 	path = external/vjepa2
 	url = https://github.com/facebookresearch/vjepa2
+[submodule "external/unified-world-model"]
+	path = external/unified-world-model
+	url = https://github.com/WEIRDLabUW/unified-world-model
