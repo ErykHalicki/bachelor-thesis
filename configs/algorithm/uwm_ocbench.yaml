@@ -63,12 +63,12 @@ encoders:
 conditioning:
   qpos_context:
     from: qpos
-    dim: 21
+    dim: 14             # robot joints only: the dataset's `slices:` drops the cube
     index: "-1..0"
     fps: ${algorithm.action_fps}
   qvel_context:
     from: qvel
-    dim: 20
+    dim: 14
     index: "-1..0"
     fps: ${algorithm.action_fps}
   front_context:

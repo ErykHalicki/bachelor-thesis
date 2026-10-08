@@ -16,7 +16,7 @@ num_flow_steps: null
 cfg_scale: null
 image_size: ${dataset.image_size}
 columns: ${dataset.columns}
-slices: {}
+slices: ${dataset.slices}           # the same dimensions training kept
 task: null
 action_filter:
   enabled: false

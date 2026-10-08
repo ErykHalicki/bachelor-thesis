@@ -15,6 +15,10 @@ Columns, named like the lerobot ones so the same algorithm configs read both:
     qpos, qvel                   the simulator state before each action, when recorded
     action                       the 7-d joint-delta action OCBench envs take
 
+A per-step column's dimensions are named `<column>.<i>` (`qpos.0` ... `qpos.20`) -- the
+names the eval backend gives the same columns -- so `slices:` keeps some of them with the
+lerobot backend's glob patterns, e.g. the robot's joints without the cube's free joint.
+
 A visual shard may keep its frames beside it in `<shard>-pixels.npy` instead of inside the
 `.npz` (scripts/collect_ocbench_visual.py writes them that way). That file is memory-mapped
 rather than loaded, since tens of GB of frames do not fit in RAM.
@@ -28,7 +32,7 @@ import torch
 
 from ..utils.spec import flow_source_entries, raw_index, spec_fields, split_index
 from .base import BaseSource
-from .lerobot import split_episodes
+from .lerobot import resolve_slice, split_episodes
 
 STATE_COLUMN = "observation.state"
 ACTION_COLUMN = "action"
@@ -120,6 +124,8 @@ class OCBenchSource(BaseSource):
       validation_split / validation_split_seed
                      as on the lerobot backend: a seeded shuffle of the kept episodes.
       columns        `{from_key: column}` remap; default identity.
+      slices         `{from_key: patterns}` keeping only some dimensions of a per-step
+                     column, matched against its `<column>.<i>` names (`"qpos.[0-9]"`).
       cameras        camera names for a visual dataset's camera axis, in env order.
       image_size     `[H, W]` to resize camera frames to; null keeps native size.
       return_uint8   uint8 [0,255] frames (default); false gives float [0,1].
@@ -129,11 +135,6 @@ class OCBenchSource(BaseSource):
 
     def __init__(self, cfg, split=None):
         self._columns = dict(cfg.get("columns") or {})
-        if cfg.get("slices"):
-            raise ValueError(
-                "the ocbench backend serves no per-dimension feature names, so `slices:` "
-                "has nothing to match; remap with `columns:` instead"
-            )
         self._return_uint8 = cfg.get("return_uint8", True)
         size = cfg.get("image_size")
         self._image_size = tuple(int(v) for v in size) if size else None
@@ -204,6 +205,21 @@ class OCBenchSource(BaseSource):
                 )
 
         self._load(paths, tables, set(field_to_col.values()))
+
+        self._slices = {}
+        for field, patterns in dict(cfg.get("slices") or {}).items():
+            if field not in field_to_col:
+                raise ValueError(
+                    f"slice given for field '{field}', which no spec entry reads. "
+                    f"sliceable fields: {sorted(f for f, c in field_to_col.items() if c in STEP_COLUMNS)}"
+                )
+            col = field_to_col[field]
+            if col not in STEP_COLUMNS:
+                raise ValueError(
+                    f"field '{field}' reads '{col}', which has no per-dimension names to slice"
+                )
+            names = [f"{col}.{i}" for i in range(self._step[col].shape[-1])]
+            self._slices[field] = np.asarray(resolve_slice(patterns, names, field), dtype=np.int64)
 
         # a per-step column reaches step L-1 at most; an observation reaches L
         ahead = max(
@@ -315,7 +331,10 @@ class OCBenchSource(BaseSource):
         for field, col in self._field_to_col.items():
             steps = self._offsets(field, ordinal, t)
             if col in STEP_COLUMNS:
-                batch[field] = torch.from_numpy(self._step[col][self._act_starts[ordinal] + steps])
+                rows = self._step[col][self._act_starts[ordinal] + steps]
+                if field in self._slices:
+                    rows = rows[:, self._slices[field]]
+                batch[field] = torch.from_numpy(np.ascontiguousarray(rows))
             elif col == STATE_COLUMN:
                 batch[field] = torch.from_numpy(self._states[self._obs_starts[ordinal] + steps])
             else:
@@ -349,7 +368,8 @@ class OCBenchSource(BaseSource):
         for key in keys:
             col = self._field_to_col.get(key, self._columns.get(key, key))
             if col in self._step:
-                out[key] = self._step[col]
+                out[key] = (self._step[col][:, self._slices[key]] if key in self._slices
+                            else self._step[col])
             elif col == STATE_COLUMN and self._states is not None:
                 steps = np.concatenate([
                     np.arange(s, s + n) for s, n in zip(self._obs_starts, self._lengths)

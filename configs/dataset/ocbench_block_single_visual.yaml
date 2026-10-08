@@ -13,6 +13,12 @@ cameras: [front, wrist]
 max_episodes: 10500
 validation_split: 0.047619
 
+# the robot's own state -- 6 arm + 8 gripper joints, qpos/qvel 0..13 -- and not the cube,
+# whose free joint is qpos 14..20 / qvel 14..19: the policy must find it in the frames
+slices:
+  qpos: "qpos.[0-9], qpos.1[0-3]"
+  qvel: "qvel.[0-9], qvel.1[0-3]"
+
 normalize:
   keys: [action, qpos, qvel]
   method: mean_std

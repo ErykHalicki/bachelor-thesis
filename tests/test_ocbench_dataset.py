@@ -152,6 +152,30 @@ def test_visual_cameras_are_separate_columns(tmp_path):
     assert dataset.stats_columns(["observation.images.front"]) is None
 
 
+def test_slices_keep_named_dimensions_of_a_step_column(tmp_path):
+    _write_sparse(tmp_path / "shard-000.npz", [(12, True)], interval=5)
+    dataset = build_dataset(_sparse_cfg(
+        tmp_path, slices={"qpos": "qpos.0, qpos.[2-3]"},
+        normalize={"keys": ["qpos"], "method": "mean_std"},
+    ))
+    assert dataset[1]["qpos"].shape == (2, 3)
+    assert len(dataset.stats["qpos"]["mean"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("slices", "message"),
+    [
+        ({"qpos": "qpos.9"}, "matches no dimension"),
+        ({"qvel": "qvel.0"}, "no spec entry reads"),
+        ({"observation.images.front": "x"}, "no per-dimension names"),
+    ],
+)
+def test_bad_slices_fail_at_build_time(tmp_path, slices, message):
+    _write_sparse(tmp_path / "shard-000.npz", [(12, True)], interval=5)
+    with pytest.raises(ValueError, match=message):
+        build_dataset(_sparse_cfg(tmp_path, slices=slices))
+
+
 def test_a_field_no_column_serves_fails_at_build_time(data_dir):
     with pytest.raises(ValueError, match="none of the requested modalities"):
         build_dataset(_cfg(
