@@ -727,8 +727,9 @@ class GenericViTTrunk(nn.Module):
         cross-attention K/V every step rather than reusing step 0's under autograd.
 
         `clamp` (independent flow time only) pins flow streams instead of integrating them:
-        a dict name -> (t, value). The stream enters every step at time t holding `value`,
-        or fresh noise when value is None, and is left out of the result. That is how one
+        a dict name -> (t, value). The stream enters every step at time t holding `value`;
+        when value is None, its x0 -- the A2A seed in `x0` if it has one, else fresh noise --
+        and it is left out of the result. That is how one
         UWM-style model is sampled in each of its modes: a future pinned at noise (t=0)
         marginalizes it (policy), actions pinned clean (t=1) condition the future on them
         (forward dynamics), a future pinned clean recovers the actions (inverse dynamics).
@@ -747,6 +748,10 @@ class GenericViTTrunk(nn.Module):
         for name, (t_fixed, value) in clamp.items():
             assert name in self.flow_names, f"clamp names '{name}', not a flow stream"
             n = self.stream_slices[name].stop - self.stream_slices[name].start
+            if value is None:
+                # t=0 is the flow's x0: the stream's A2A seed when it has one (training
+                # noises toward the seed, not toward a Gaussian), fresh noise otherwise
+                value = x0.get(name)
             pinned[name] = (
                 torch.full((B,), float(t_fixed), device=device, dtype=dtype),
                 value.to(device=device, dtype=dtype) if value is not None

@@ -177,3 +177,25 @@ def test_pinning_part_of_a_group_is_refused():
     with pytest.raises(ValueError, match="only in part"):
         model.predict(batch(), clamp={"future": 0.0, "wrist": 1.0})
     assert set(model.predict(batch(), clamp={"future": 0.0, "wrist": 0.0})) == {"action"}
+
+
+def test_a_stream_pinned_at_noise_holds_its_a2a_seed():
+    """With a `source:` seed, t=0 IS the seed (training noises toward it), so a stream
+    pinned at noise must hold the seed, not a fresh Gaussian."""
+    model = build_algorithm(uwm_cfg())
+    trunk = model.predictor
+    seen = []
+    real_forward = trunk.forward
+
+    def spy(tokens, t=None, *args, **kwargs):
+        seen.append(tokens["future"].clone())
+        return real_forward(tokens, t, *args, **kwargs)
+
+    trunk.forward = spy
+    clean = {"state": torch.randn(4, 2, 5)}
+    seed = torch.full((4, 1, 6), 3.0)
+    trunk.integrate(clean, num_steps=2, x0={"future": seed}, clamp={"future": (0.0, None)})
+    assert all(torch.equal(x, seed) for x in seen)
+    seen.clear()
+    trunk.integrate(clean, num_steps=2, clamp={"future": (0.0, None)})
+    assert not torch.equal(seen[0], seed)   # no seed: Gaussian as before

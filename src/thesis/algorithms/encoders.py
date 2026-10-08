@@ -552,6 +552,30 @@ class LinearEncoder(Encoder):
         return self.proj(x)
 
 
+class BatchNormEncoder(Encoder):
+    """BatchNorm over the last dim: (..., dim) -> (..., dim), statistics over every other
+    axis (batch, steps, tokens). Chained after a trainable pool (`input: <name>`), it pins
+    the latent a flow stream targets to zero mean and unit variance per dim -- the scale of
+    the flow's Gaussian noise -- which an end-to-end encoder is otherwise free to shrink
+    toward, since smaller targets lower the flow loss.
+
+    Spec: `dim`, `affine` (default false: a learned per-dim scale could shrink the latent
+    all over again), `momentum` (default 0.1), `eps` (default 1e-5).
+    """
+
+    def __init__(self, spec):
+        super().__init__(spec)
+        self.norm = nn.BatchNorm1d(
+            int(spec["dim"]),
+            affine=bool(spec.get("affine", False)),
+            momentum=float(spec.get("momentum", 0.1)),
+            eps=float(spec.get("eps", 1e-5)),
+        )
+
+    def forward(self, x):
+        return self.norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
+
+
 class MLPEncoder(Encoder):
     """SwiGLU MLP over the last dim: norm(w(x)) * silu(w_gate(x)) -> Linear,
     i.e. the trunk's make_mlp with an optional norm on the value path. Encodes a
@@ -737,6 +761,7 @@ _ENCODER_TYPES = {
     "resnet": ResNetEncoder,
     "attentive_pool": AttentivePoolEncoder,
     "linear": LinearEncoder,
+    "batchnorm": BatchNormEncoder,
     "mlp": MLPEncoder,
     "chunk_mlp": ChunkMLPEncoder,
     "reshape": ReshapeEncoder,

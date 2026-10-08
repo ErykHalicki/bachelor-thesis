@@ -239,3 +239,27 @@ def test_chain_cycle_in_config_raises():
     cfg.encoders.vjepa["input"] = "head"
     with pytest.raises(ValueError, match="no raw input"):
         chain_algo(cfg)
+
+
+def test_batchnorm_encoder_pins_unit_scale_over_every_axis():
+    from omegaconf import OmegaConf
+    from thesis.algorithms.encoders import build_encoder
+
+    enc = build_encoder(OmegaConf.create({"type": "batchnorm", "dim": 6}))
+    assert not any(p.requires_grad for p in enc.parameters())   # affine off by default
+    x = 0.2 * torch.randn(16, 3, 6) + 5.0
+    y = enc(x)
+    assert y.shape == x.shape
+    flat = y.reshape(-1, 6)
+    assert torch.allclose(flat.mean(0), torch.zeros(6), atol=1e-4)
+    assert torch.allclose(flat.std(0, unbiased=False), torch.ones(6), atol=1e-3)
+    enc.eval()
+    assert not torch.allclose(enc(x), y)   # eval reads the running statistics instead
+
+
+def test_batchnorm_encoder_affine_is_opt_in():
+    from omegaconf import OmegaConf
+    from thesis.algorithms.encoders import build_encoder
+
+    enc = build_encoder(OmegaConf.create({"type": "batchnorm", "dim": 4, "affine": True}))
+    assert sum(p.numel() for p in enc.parameters() if p.requires_grad) == 8

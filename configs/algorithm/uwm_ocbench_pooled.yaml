@@ -1,8 +1,10 @@
 # uwm_ocbench with every frame pooled to ONE token: the frozen ResNet18's 8x8 grid goes
 # through a trainable attentive pool per camera, so each frame is a single 512-d latent and
 # the trunk sees 35 tokens instead of 413. The pool trains with the flow loss on both the
-# context it encodes and the future it targets, so SIGReg holds its output to an isotropic
-# Gaussian -- the anti-collapse term the flow_wam arms put on their pooled latents.
+# context it encodes and the future it targets, so a parameter-free BatchNorm pins its output
+# to unit scale -- the scale of the flow's noise; unnormalized, the pooled latents shrank to
+# std ~0.19 and the futures integrated to mostly leftover noise -- and SIGReg on the BatchNorm
+# output holds it to an isotropic Gaussian, the anti-collapse term the flow_wam arms use.
 defaults:
   - uwm_ocbench
   - _self_
@@ -22,14 +24,35 @@ encoders:
     out_dim: 512
     tokens_per_step: 64
     num_queries: 1
+  # the end of each camera's chain: every stream reading a camera, and its SIGReg term,
+  # sees the normalized pooled latent
+  bn_front:
+    type: batchnorm
+    input: pool_front
+    dim: 512
+  bn_wrist:
+    type: batchnorm
+    input: pool_wrist
+    dim: 512
 
 conditioning:
-  front_context: {encoder: pool_front, grid: [1, 1]}
-  wrist_context: {encoder: pool_wrist, grid: [1, 1]}
+  front_context: {encoder: bn_front, grid: [1, 1]}
+  wrist_context: {encoder: bn_wrist, grid: [1, 1]}
 
+# A2A seeding (arXiv:2602.07322) on the video only: each future flows from its own camera's
+# newest context latent instead of from a Gaussian, so v = 0 already
+# predicts persistence -- held out, persistence explained ~80% (front) / ~40% (wrist) of the
+# future latent's variance -- and the field only learns the change. The action stream keeps
+# its Gaussian x0.
 predict:
-  front_future: {encoder: pool_front, grid: [1, 1]}
-  wrist_future: {encoder: pool_wrist, grid: [1, 1]}
+  front_future:
+    encoder: bn_front
+    grid: [1, 1]
+    source: {stream: front_context, rows: "-1"}
+  wrist_future:
+    encoder: bn_wrist
+    grid: [1, 1]
+    source: {stream: wrist_context, rows: "-1"}
 
 model:
   # positions are token order alone: every head dim rotates on `seq`, nothing on time.
@@ -45,7 +68,7 @@ losses:
   - {type: flow, stream: action, weight: 1.0}
   - {type: flow, stream: front_future, weight: 1.0}
   - {type: flow, stream: wrist_future, weight: 1.0}
-  # on the pooled output both context and future read -- the space the flow lives in
+  # on the BatchNorm output both context and future read -- the space the flow lives in
   - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
      streams: [front_context, front_future]}
   - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
