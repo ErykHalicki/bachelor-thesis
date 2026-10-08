@@ -263,3 +263,16 @@ def test_batchnorm_encoder_affine_is_opt_in():
 
     enc = build_encoder(OmegaConf.create({"type": "batchnorm", "dim": 4, "affine": True}))
     assert sum(p.numel() for p in enc.parameters() if p.requires_grad) == 8
+
+
+def test_batchnorm_encoder_takes_a_single_row_in_training():
+    """The auto-batch probe runs batch 1, and a future stream is one latent per sample."""
+    from omegaconf import OmegaConf
+    from thesis.algorithms.encoders import build_encoder
+
+    enc = build_encoder(OmegaConf.create({"type": "batchnorm", "dim": 5}))
+    enc.train()
+    before = enc.norm.running_mean.clone()
+    y = enc(torch.randn(1, 1, 5))
+    assert y.shape == (1, 1, 5) and torch.isfinite(y).all()
+    assert torch.equal(enc.norm.running_mean, before)

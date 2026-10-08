@@ -573,7 +573,15 @@ class BatchNormEncoder(Encoder):
         )
 
     def forward(self, x):
-        return self.norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
+        flat = x.reshape(-1, x.shape[-1])
+        if self.training and flat.shape[0] < 2:
+            # one row has no batch statistics (BatchNorm1d raises); the auto-batch probe
+            # starts at batch 1 and a future stream is one latent per sample. Normalize with
+            # the running statistics, as eval does, and leave them untouched
+            n = self.norm
+            return F.batch_norm(flat, n.running_mean, n.running_var, n.weight, n.bias,
+                                training=False, eps=n.eps).reshape(x.shape)
+        return self.norm(flat).reshape(x.shape)
 
 
 class MLPEncoder(Encoder):
