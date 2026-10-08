@@ -10,13 +10,14 @@ the gap is raw throughput and VRAM, not missing kernels.
 with no sm_70, so on a V100 every CUDA op fails with
 `no kernel image is available for execution on the device`.
 
-The newest torch that still ships Volta kernels is 2.7.x. Because this diverges from
-the lockfile, use a dedicated venv rather than `uv sync`:
+The newest torch that still ships Volta kernels is 2.7.x. Training runs on the V100 only,
+so the repo's `.venv` IS this environment. Build it with `uv pip` as below, never `uv sync`,
+which would reinstall the lockfile's sm_75+ torch over it:
 
 ```bash
-uv venv .venv-v100 --python 3.12
-uv pip install --python .venv-v100/bin/python -e ".[b601,vjepa,wandb]"
-uv pip install --python .venv-v100/bin/python \
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -e ".[b601,vjepa,wandb]"
+uv pip install --python .venv/bin/python \
   "torch==2.7.1+cu126" "torchvision==0.22.1+cu126" "torchcodec<0.6" \
   --index-url https://download.pytorch.org/whl/cu126
 ```
@@ -29,7 +30,7 @@ over an already-present cu128 build either; the version strings match, so uv rep
 "Checked 3 packages" and changes nothing. Verify rather than assume:
 
 ```bash
-.venv-v100/bin/python -c "import torch; print(torch.cuda.get_arch_list())"
+.venv/bin/python -c "import torch; print(torch.cuda.get_arch_list())"
 ```
 
 `sm_70` must appear in that list. The `vastai/pytorch:2.7.1-cu128-*` images ship a
@@ -42,8 +43,8 @@ which the torch cu126 wheel does not bundle. The dataloader dies at startup with
 `Could not load libtorchcodec ... libnppicc.so.12: cannot open shared object file`.
 
 ```bash
-uv pip install --python .venv-v100/bin/python nvidia-npp-cu12 nvidia-nvjpeg-cu12
-export LD_LIBRARY_PATH=$(ls -d .venv-v100/lib/python3.12/site-packages/nvidia/*/lib | tr '\n' ':')$LD_LIBRARY_PATH
+uv pip install --python .venv/bin/python nvidia-npp-cu12 nvidia-nvjpeg-cu12
+export LD_LIBRARY_PATH=$(ls -d .venv/lib/python3.12/site-packages/nvidia/*/lib | tr '\n' ':')$LD_LIBRARY_PATH
 ```
 
 Put the `export` in the run script or shell rc so every process sees it.
@@ -116,9 +117,9 @@ Serving works on a 16 GB V100 once fix 1 is applied. `pi05` (4.14B params, the
 
 ```bash
 cd /path/to/thesis
-export LD_LIBRARY_PATH=$(ls -d .venv-v100/lib/python3.12/site-packages/nvidia/*/lib | tr '\n' ':')$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$(ls -d .venv/lib/python3.12/site-packages/nvidia/*/lib | tr '\n' ':')$LD_LIBRARY_PATH
 export CC=gcc CXX=g++
-.venv-v100/bin/python main.py run=<arm> \
+.venv/bin/python main.py run=<arm> \
   experiment.num_workers=8 \
   wandb.mode=online wandb.entity=<entity>
 ```
@@ -130,9 +131,12 @@ launch fails with `CUDA 13.x requires sm_75 or higher`. Install the `+cu12` whee
 Warp GitHub release over it, matching the version the `ocbench` extra resolved:
 
 ```bash
-uv pip install --python .venv-v100/bin/python -e ".[ocbench]"
-uv pip install --python .venv-v100/bin/python --reinstall-package warp-lang \
+uv pip install --python .venv/bin/python -e ".[ocbench]"
+uv pip install --python .venv/bin/python --reinstall-package warp-lang \
   "warp-lang @ https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0%2Bcu12-py3-none-manylinux_2_28_x86_64.whl"
+# scripts/collect_ocbench_visual.py drives OCBench's own collector, whose module imports
+# jax and flax; CPU builds are enough (it runs with JAX_PLATFORMS=cpu)
+uv pip install --python .venv/bin/python jax flax
 ```
 
 The first rollout compiles Warp's kernels for sm_70, about 6 minutes; they are cached in

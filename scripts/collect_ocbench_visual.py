@@ -15,8 +15,8 @@ at 128 px a 10k-episode dataset holds tens of GB of frames, more than fits in RA
 Shards are collected until the successful episodes reach --num_successes; failed episodes
 are kept in the shards and dropped by the dataset backend's `success_only`.
 
-Needs ocbench's `impls` dependencies (jax, flax), so run it with an env that has
-`ocbench[mjwarp,train]`, e.g. on eryk-pc:
+Needs ocbench's `impls` dependencies (jax, flax), which the repo's `.venv` carries (see
+docs/v100_setup.md), e.g. on eryk-pc:
 
     CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=egl JAX_PLATFORMS=cpu \
       .venv/bin/python scripts/collect_ocbench_visual.py --out ~/data/ocbench_visual
