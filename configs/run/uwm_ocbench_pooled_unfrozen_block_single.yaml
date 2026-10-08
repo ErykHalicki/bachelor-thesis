@@ -1,0 +1,9 @@
+# @package _global_
+# uwm_ocbench_pooled_block_single with the ResNet18 unfrozen
+# (configs/algorithm/uwm_ocbench_pooled_unfrozen.yaml):
+#
+#   python main.py run=uwm_ocbench_pooled_unfrozen_block_single
+defaults:
+  - uwm_ocbench_pooled_block_single
+  - override /algorithm: uwm_ocbench_pooled_unfrozen
+  - _self_

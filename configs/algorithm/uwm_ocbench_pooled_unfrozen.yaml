@@ -1,0 +1,11 @@
+# uwm_ocbench_pooled with the ResNet18 trained end to end: the ImageNet weights are only the
+# starting point, and the flow loss shapes the backbone through both the context frames and
+# the future targets. SIGReg on the pooled latents is what keeps that moving target space
+# from collapsing, as it does for the flow_wam arms' unfrozen backbones.
+defaults:
+  - uwm_ocbench_pooled
+  - _self_
+
+encoders:
+  resnet:
+    frozen: false
