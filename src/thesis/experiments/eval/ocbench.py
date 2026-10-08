@@ -101,7 +101,7 @@ class OCBenchEval:
       pixel_size         their square render size.
       pixel_interval     render every this many steps, holding frames in between.
       video_cameras      the policy cameras (`cameras` names) also recorded as eval videos,
-                         beside the third-person one, at `video_stride`; null records every
+                         beside the third-person one, at `video_stride`; null (the default) records every
                          camera the policy reads. Needs `pixel_cameras`.
       holdout            also report the held-out loss (needs dataset.validation_split).
     plus the ChunkDriver knobs every rollout backend takes (execute_len, num_flow_steps,
