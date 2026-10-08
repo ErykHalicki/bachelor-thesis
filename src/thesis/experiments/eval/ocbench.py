@@ -127,7 +127,10 @@ class OCBenchEval:
         if not cams:
             return {}
         size = int(self.cfg.get("pixel_size", 128))
-        return {"width": size, "height": size, "pixel_cameras": tuple(str(c) for c in cams)}
+        # a state env draws its info overlays (the goal-target marker) into renders by
+        # default; OCBench's visual envs, and so every collected frame, turn them off
+        return {"width": size, "height": size, "pixel_cameras": tuple(str(c) for c in cams),
+                "visualize_info": bool(self.cfg.get("visualize_info", False))}
 
     def _obs_features(self, env, info):
         space = env.single_observation_space

@@ -150,7 +150,8 @@ def test_cameras_render_every_interval_and_hold_in_between():
         episodes=4, num_envs=4, pixel_cameras=["front", "ur5e/wrist"], pixel_size=4,
         pixel_interval=2, cameras=["front", "wrist"],
     )
-    assert env.kwargs == {"width": 4, "height": 4, "pixel_cameras": ("front", "ur5e/wrist")}
+    assert env.kwargs == {"width": 4, "height": 4, "pixel_cameras": ("front", "ur5e/wrist"),
+                          "visualize_info": False}
     # rendered before steps 1, 3 and 5 (env time 0, 2, 4) -- the last only for worlds
     # still running, and solved worlds finish on step 3
     solved = [_solves(s) for s in env.seeds]
