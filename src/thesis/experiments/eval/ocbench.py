@@ -100,6 +100,9 @@ class OCBenchEval:
                          ur5e/wrist), served under `cameras` names; null renders nothing.
       pixel_size         their square render size.
       pixel_interval     render every this many steps, holding frames in between.
+      video_cameras      the policy cameras (`cameras` names) also recorded as eval videos,
+                         beside the third-person one, at `video_stride`; null records every
+                         camera the policy reads. Needs `pixel_cameras`.
       holdout            also report the held-out loss (needs dataset.validation_split).
     plus the ChunkDriver knobs every rollout backend takes (execute_len, num_flow_steps,
     cfg_scale, image_size, columns, server, ...).
@@ -236,6 +239,19 @@ class OCBenchEval:
         steps = np.zeros(num_envs, dtype=int)
         recording = list(range(min(live, max(0, max_videos))))
         clips = {w: [env.render_world(w).copy()] for w in recording}
+        # the policy's own view, rendered on the video stride rather than taken from the
+        # frames the policy reads, which only change every `pixel_interval` steps
+        video_cams = self._video_cameras(cameras) if render else []
+        cam_clips = {w: {c: [] for _, c in video_cams} for w in recording}
+
+        def record_cameras(worlds):
+            if video_cams and worlds:
+                views = env.get_pixel_observation(worlds)
+                for w, view in zip(worlds, views):
+                    for i, name in video_cams:
+                        cam_clips[w][name].append(np.asarray(view[i]).copy())
+
+        record_cameras(recording)
 
         for tick in range(1, max_steps + 1):
             if render and (tick - 1) % render_every == 0:
@@ -257,9 +273,10 @@ class OCBenchEval:
             ended = active & (np.asarray(terminated, dtype=bool) | (tick >= max_steps))
             success[ended] = np.asarray(info["success"], dtype=bool)[ended]
             healthy[ended] = np.asarray(info["healthy"], dtype=bool)[ended]
-            for w in recording:
-                if active[w] and (tick % stride == 0 or ended[w]):
-                    clips[w].append(env.render_world(w).copy())
+            due = [w for w in recording if active[w] and (tick % stride == 0 or ended[w])]
+            for w in due:
+                clips[w].append(env.render_world(w).copy())
+            record_cameras(due)
             done |= ended
             if done.all():
                 break
@@ -276,10 +293,21 @@ class OCBenchEval:
             })
             if w in clips:
                 videos[f"ep{episode}"] = np.stack(clips[w]).transpose(0, 3, 1, 2)
+            for name, frames in cam_clips.get(w, {}).items():
+                videos[f"ep{episode}_{name}"] = np.stack(frames).transpose(0, 3, 1, 2)
         print(f"eval {cfg.env_name} episodes {start}-{start + live - 1}: "
               f"{success[:live].mean():.0%} success, {time.perf_counter() - opened:.0f}s "
               f"on {num_envs} worlds", flush=True)
         return rows, videos
+
+    def _video_cameras(self, cameras):
+        """`video_cameras` -> [(camera axis, name)], null meaning every policy camera."""
+        wanted = self.cfg.get("video_cameras")
+        names = list(cameras) if wanted is None else [str(c) for c in wanted]
+        unknown = [n for n in names if n not in cameras]
+        if unknown:
+            raise ValueError(f"video_cameras {unknown} are not policy cameras ({list(cameras)})")
+        return [(cameras.index(n), n) for n in names]
 
     def _holdout_loss(self, model):
         """Held-out loss alongside the success rate, under the usual `loss` names."""

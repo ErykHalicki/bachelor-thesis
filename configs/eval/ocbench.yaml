@@ -9,6 +9,8 @@ seed: 0
 cameras: ${dataset.cameras}
 max_videos: 2
 video_stride: 10
+# policy cameras also recorded as videos (needs pixel_cameras); null = every camera it reads
+video_cameras: [wrist]
 holdout: true
 
 execute_len: null               # null: the model's own

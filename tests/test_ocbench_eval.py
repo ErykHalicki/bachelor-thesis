@@ -146,9 +146,10 @@ def test_visual_observations_split_into_camera_columns():
 
 
 def test_cameras_render_every_interval_and_hold_in_between():
+    # no camera videos: their renders would interleave with the policy's
     result, env, batch = _run(
         episodes=4, num_envs=4, pixel_cameras=["front", "ur5e/wrist"], pixel_size=4,
-        pixel_interval=2, cameras=["front", "wrist"],
+        pixel_interval=2, cameras=["front", "wrist"], video_cameras=[],
     )
     assert env.kwargs == {"width": 4, "height": 4, "pixel_cameras": ("front", "ur5e/wrist"),
                           "visualize_info": False}
@@ -162,3 +163,30 @@ def test_cameras_render_every_interval_and_hold_in_between():
     assert held == [0, 0, 2, 2]
     first = batch.frames[0][0]
     assert first["qpos"].shape == (4,) and first["qvel"].dtype == np.float32
+
+
+def test_policy_cameras_are_recorded_as_videos():
+    result, env, _ = _run(
+        episodes=2, num_envs=2, pixel_cameras=["front", "ur5e/wrist"], pixel_size=4,
+        pixel_interval=2, cameras=["front", "wrist"], video_cameras=["wrist"],
+    )
+    assert sorted(result.videos) == ["ep0", "ep0_wrist"]
+    wrist = result.videos["ep0_wrist"]
+    # wrist pixels are the env time they were rendered at (FakeEnv), on the video stride
+    assert wrist.shape[1:] == (3, 4, 5)
+    assert len(wrist) == len(result.videos["ep0"])
+
+
+def test_video_cameras_default_to_every_policy_camera():
+    result, _, _ = _run(
+        episodes=1, num_envs=1, pixel_cameras=["front", "ur5e/wrist"], pixel_size=4,
+        pixel_interval=2, cameras=["front", "wrist"], video_cameras=None,
+    )
+    assert sorted(result.videos) == ["ep0", "ep0_front", "ep0_wrist"]
+
+
+def test_unknown_video_camera_is_refused():
+    import pytest
+    with pytest.raises(ValueError, match="not policy cameras"):
+        _run(episodes=1, num_envs=1, pixel_cameras=["front"], pixel_size=4,
+             cameras=["front"], video_cameras=["side"])
