@@ -1,0 +1,9 @@
+# @package _global_
+# uwm_ocbench_block_single with each frame pooled to one SIGReg-regularized latent
+# (configs/algorithm/uwm_ocbench_pooled.yaml):
+#
+#   python main.py run=uwm_ocbench_pooled_block_single
+defaults:
+  - uwm_ocbench_block_single
+  - override /algorithm: uwm_ocbench_pooled
+  - _self_

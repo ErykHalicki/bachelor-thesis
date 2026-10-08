@@ -1,0 +1,54 @@
+# uwm_ocbench with every frame pooled to ONE token: the frozen ResNet18's 4x4 grid goes
+# through a trainable attentive pool per camera, so each frame is a single 512-d latent and
+# the trunk sees 35 tokens instead of 125. The pool trains with the flow loss on both the
+# context it encodes and the future it targets, so SIGReg holds its output to an isotropic
+# Gaussian -- the anti-collapse term the flow_wam arms put on their pooled latents.
+defaults:
+  - uwm_ocbench
+  - _self_
+
+encoders:
+  pool_front:
+    type: attentive_pool
+    input: resnet
+    in_dim: 512
+    out_dim: 512
+    tokens_per_step: 16   # the ResNet grid area, (128 / 32)^2
+    num_queries: 1        # every stream reading it declares grid [1, 1]
+  pool_wrist:
+    type: attentive_pool
+    input: resnet
+    in_dim: 512
+    out_dim: 512
+    tokens_per_step: 16
+    num_queries: 1
+
+conditioning:
+  front_context: {encoder: pool_front, grid: [1, 1]}
+  wrist_context: {encoder: pool_wrist, grid: [1, 1]}
+
+predict:
+  front_future: {encoder: pool_front, grid: [1, 1]}
+  wrist_future: {encoder: pool_wrist, grid: [1, 1]}
+
+model:
+  # one token per frame leaves nothing on the height/width axes, and `period: auto` cannot
+  # fit an empty axis: drop them (null removes an inherited axis), as vision/pooled does
+  rope:
+    time:   {share: 0.6, period: auto}
+    seq:    {share: 0.2, period: auto}
+    height: null
+    width:  null
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: flow, stream: front_future, weight: 1.0}
+  - {type: flow, stream: wrist_future, weight: 1.0}
+  # on the pooled output both context and future read -- the space the flow lives in
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [front_context, front_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [wrist_context, wrist_future]}
+  # observed only (weight 0): the integrated endpoints, scored on held-out batches
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}
