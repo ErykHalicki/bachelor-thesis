@@ -32,13 +32,14 @@ predict:
   wrist_future: {encoder: pool_wrist, grid: [1, 1]}
 
 model:
-  # one token per frame leaves nothing on the height/width axes, and `period: auto` cannot
-  # fit an empty axis: drop them (null removes an inherited axis), as vision/pooled does
+  # positions are token order alone: every head dim rotates on `seq`, nothing on time.
+  # One token per frame also leaves the height/width axes empty, which `period: auto`
+  # cannot fit; null removes an inherited axis
   rope:
-    time:   {share: 0.6, period: auto}
-    seq:    {share: 0.2, period: auto}
+    time:   null
     height: null
     width:  null
+    seq:    {share: 1.0, period: auto}
 
 losses:
   - {type: flow, stream: action, weight: 1.0}
