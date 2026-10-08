@@ -1,0 +1,23 @@
+# uwm_ocbench_pooled_unfrozen trained as a POLICY only: the same model -- unfrozen ResNet18,
+# attentive pools, future-frame tokens and all -- with every UWM objective but the action
+# one removed. The future group is pinned at pure noise on every row (UWM's policy mode,
+# the state the eval samples in), and no flow loss reads it, so the action denoising loss
+# is the only prediction objective. SIGReg on the pooled context + future latents stays.
+defaults:
+  - uwm_ocbench_pooled_unfrozen
+  - _self_
+
+flow_time:
+  independent: true
+  # replaces the parent's floats: futures always at noise, actions never handed in clean
+  noise_prob: {front_future: 1.0, wrist_future: 1.0, action: 0.0}
+  clean_prob: 0.0
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [front_context, front_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal,
+     streams: [wrist_context, wrist_future]}
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

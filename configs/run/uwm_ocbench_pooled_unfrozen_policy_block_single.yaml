@@ -1,0 +1,7 @@
+# @package _global_
+# uwm_ocbench_pooled_unfrozen_block_single trained on the policy objective alone
+# (configs/algorithm/uwm_ocbench_pooled_unfrozen_policy.yaml): the no-UWM baseline for it.
+defaults:
+  - uwm_ocbench_pooled_unfrozen_block_single
+  - override /algorithm: uwm_ocbench_pooled_unfrozen_policy
+  - _self_

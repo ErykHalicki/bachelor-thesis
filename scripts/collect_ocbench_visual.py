@@ -39,9 +39,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--env_name", default="visual-block-single-task1-v0")
 parser.add_argument("--out", required=True)
 parser.add_argument("--num_successes", type=int, default=10500)
-# a shard's frames are held in RAM until written: ~15 GB at 625 episodes and 256 px
-parser.add_argument("--shard_episodes", type=int, default=625)
-parser.add_argument("--max_parallel", type=int, default=625)
+# a shard's frames sit in RAM until written, twice over while they are joined: ~15 GB at
+# 300 episodes and 256 px. Collection is seeded per shard, so keep this equal across machines
+# that should hold the same data
+parser.add_argument("--shard_episodes", type=int, default=300)
+parser.add_argument("--max_parallel", type=int, default=300)
 parser.add_argument("--observation_interval", type=int, default=25)
 parser.add_argument("--size", type=int, default=256)
 parser.add_argument("--cameras", default="front,ur5e/wrist")
