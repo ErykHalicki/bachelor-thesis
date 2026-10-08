@@ -20,7 +20,8 @@
 
 set -euo pipefail
 SCRATCH=/scratch/st-dushan20-1/ehalicki
-export MUJOCO_GL=egl WANDB_MODE=offline
+# unbuffered: a job's stdout is a file, so prints otherwise sit in an 8 KB buffer for ~30 min
+export MUJOCO_GL=egl WANDB_MODE=offline PYTHONUNBUFFERED=1
 export WANDB_DIR=$SCRATCH/wandb/run WANDB_CACHE_DIR=$SCRATCH/wandb/cache WANDB_DATA_DIR=$SCRATCH/wandb/data
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
 
