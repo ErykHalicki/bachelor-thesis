@@ -26,5 +26,5 @@ experiment:
 # 25 steps, which is also when the policy replans (execute_len = chunk_len = 25)
 eval:
   pixel_cameras: [front, ur5e/wrist]
-  pixel_size: 128
+  pixel_size: 256
   pixel_interval: 25

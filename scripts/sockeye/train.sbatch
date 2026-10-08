@@ -27,7 +27,7 @@ mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
 
 echo "job $SLURM_JOB_ID on $(hostname): $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 srun .venv/bin/python main.py \
-    dataset.dataset_path=$SCRATCH/data/ocbench_visual \
+    dataset.dataset_path=$SCRATCH/data/ocbench_visual_256 \
     experiment.batch_size=auto experiment.effective_batch=256 \
     experiment.num_workers=$((SLURM_CPUS_PER_TASK - 1)) \
     wandb.mode=offline \

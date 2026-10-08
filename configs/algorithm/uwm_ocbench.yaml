@@ -8,9 +8,9 @@
 #   video prediction   actions pinned at noise, futures denoised
 #   joint              both denoised together                            (no clamp)
 #
-# Frames are predicted as frozen ImageNet ResNet18 latents -- a 4x4 grid of 512-d features
-# per 128 px frame -- never pixels. Frozen, so the targets cannot collapse and need no
-# sigreg; measured on the collected frames they sit near unit scale (std ~1.2-1.4 per dim).
+# Frames are predicted as frozen ImageNet ResNet18 latents -- an 8x8 grid of 512-d features
+# per 256 px frame -- never pixels. Frozen, so the targets cannot collapse and need no
+# sigreg; measured on 128 px frames they sat near unit scale (std ~1.2-1.4 per dim).
 name: generic_vit_predictor
 
 action_dim: 7
@@ -57,7 +57,7 @@ encoders:
     type: resnet
     variant: resnet18
     weights: pretrained
-    pooling: grid       # (128 / 32)^2 = a 4x4 grid per frame
+    pooling: grid       # (256 / 32)^2 = an 8x8 grid per frame
     frozen: true
 
 conditioning:
@@ -78,7 +78,7 @@ conditioning:
     index: "-1..0"
     raw_index: "-25, 0"
     fps: ${algorithm.video_fps}
-    grid: [4, 4]
+    grid: [8, 8]
   wrist_context:
     from: observation.images.wrist
     encoder: resnet
@@ -86,7 +86,7 @@ conditioning:
     index: "-1..0"
     raw_index: "-25, 0"
     fps: ${algorithm.video_fps}
-    grid: [4, 4]
+    grid: [8, 8]
   action_context:
     from: action
     role: action
@@ -115,7 +115,7 @@ predict:
     index: "1"
     raw_index: "25"
     fps: ${algorithm.video_fps}
-    grid: [4, 4]
+    grid: [8, 8]
     token_in:
       type: mlp
       mlp_dim: ${algorithm.model.model_dim}
@@ -128,7 +128,7 @@ predict:
     index: "1"
     raw_index: "25"
     fps: ${algorithm.video_fps}
-    grid: [4, 4]
+    grid: [8, 8]
     token_in:
       type: mlp
       mlp_dim: ${algorithm.model.model_dim}

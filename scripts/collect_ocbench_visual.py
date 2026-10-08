@@ -10,7 +10,7 @@ Every shard is written as
     <out>/shard-NNN-pixels.npy  the sparse frames, (rows, cameras, H, W, 3) uint8
 
 The frames live in their own uncompressed .npy so the dataset backend can memory-map them:
-at 128 px a 10k-episode dataset holds tens of GB of frames, more than fits in RAM.
+at 256 px a 10k-episode dataset holds ~150 GB of frames, far more than fits in RAM.
 
 Shards are collected until the successful episodes reach --num_successes; failed episodes
 are kept in the shards and dropped by the dataset backend's `success_only`.
@@ -19,7 +19,7 @@ Needs ocbench's `impls` dependencies (jax, flax), which the repo's `.venv` carri
 docs/v100_setup.md), e.g. on eryk-pc:
 
     CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=egl JAX_PLATFORMS=cpu \
-      .venv/bin/python scripts/collect_ocbench_visual.py --out ~/data/ocbench_visual
+      .venv/bin/python scripts/collect_ocbench_visual.py --out ~/data/ocbench_visual_256
 """
 
 import argparse
@@ -39,10 +39,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--env_name", default="visual-block-single-task1-v0")
 parser.add_argument("--out", required=True)
 parser.add_argument("--num_successes", type=int, default=10500)
-parser.add_argument("--shard_episodes", type=int, default=1250)
-parser.add_argument("--max_parallel", type=int, default=1250)
+# a shard's frames are held in RAM until written: ~15 GB at 625 episodes and 256 px
+parser.add_argument("--shard_episodes", type=int, default=625)
+parser.add_argument("--max_parallel", type=int, default=625)
 parser.add_argument("--observation_interval", type=int, default=25)
-parser.add_argument("--size", type=int, default=128)
+parser.add_argument("--size", type=int, default=256)
 parser.add_argument("--cameras", default="front,ur5e/wrist")
 parser.add_argument("--seed", type=int, default=0)
 args = parser.parse_args()

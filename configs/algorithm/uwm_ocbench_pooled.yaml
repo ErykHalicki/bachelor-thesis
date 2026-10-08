@@ -1,6 +1,6 @@
-# uwm_ocbench with every frame pooled to ONE token: the frozen ResNet18's 4x4 grid goes
+# uwm_ocbench with every frame pooled to ONE token: the frozen ResNet18's 8x8 grid goes
 # through a trainable attentive pool per camera, so each frame is a single 512-d latent and
-# the trunk sees 35 tokens instead of 125. The pool trains with the flow loss on both the
+# the trunk sees 35 tokens instead of 413. The pool trains with the flow loss on both the
 # context it encodes and the future it targets, so SIGReg holds its output to an isotropic
 # Gaussian -- the anti-collapse term the flow_wam arms put on their pooled latents.
 defaults:
@@ -13,14 +13,14 @@ encoders:
     input: resnet
     in_dim: 512
     out_dim: 512
-    tokens_per_step: 16   # the ResNet grid area, (128 / 32)^2
+    tokens_per_step: 64   # the ResNet grid area, (256 / 32)^2
     num_queries: 1        # every stream reading it declares grid [1, 1]
   pool_wrist:
     type: attentive_pool
     input: resnet
     in_dim: 512
     out_dim: 512
-    tokens_per_step: 16
+    tokens_per_step: 64
     num_queries: 1
 
 conditioning:
