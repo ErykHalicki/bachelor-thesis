@@ -175,7 +175,12 @@ class TrainingMixin:
                 if not last_micro:
                     continue
                 loss_val = window["loss"]
-                loss_ema = loss_val if loss_ema is None else ema_beta * loss_ema + (1 - ema_beta) * loss_val
+                # a non-finite loss is an fp16 overflow the grad scaler skips; folding it in
+                # would leave the smoothed loss nan for the rest of the run
+                if loss_ema is None or not math.isfinite(loss_ema):
+                    loss_ema = loss_val
+                elif math.isfinite(loss_val):
+                    loss_ema = ema_beta * loss_ema + (1 - ema_beta) * loss_val
                 if step % exp.log_every == 0:
                     acc.print(f"step {step}  loss {loss_val:.4f}  ema {loss_ema:.4f}"
                               f"  data {data_time:.3f}s  compute {compute_time:.3f}s"

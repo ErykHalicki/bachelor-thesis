@@ -17,6 +17,7 @@ experiment:
   max_steps: 200000
   eval_every: 2500
   save_every: 2500
+  log_every: 100
   lr_warmup_steps: 1000
   optimizer:
     lr: 1.0e-4
