@@ -32,12 +32,16 @@ model:
     height: {share: 0.2, period: auto}
     width:  {share: 0.2, period: auto}
 
-# UWM samples each stream's time on its own. The endpoint masses train the exact states
-# inference pins a stream to: at noise (marginalized) or clean (given)
+# UWM samples each modality's time on its own. The endpoint masses train the exact states
+# inference pins a stream to: at noise (marginalized) or clean (given). The two cameras'
+# futures share ONE time, as UWM's single observation stream does: drawn apart, policy
+# mode (both at noise) would be ~1% of training rather than `noise_prob`
 flow_time:
   independent: true
   noise_prob: 0.1
   clean_prob: 0.1
+  groups:
+    - [front_future, wrist_future]
 
 # the rollout eval drives the POLICY mode: futures marginalized at noise
 inference_clamp:

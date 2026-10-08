@@ -829,6 +829,7 @@ class GenericViTPredictor(PredictiveModel):
         self.cfg_drop = tuple(cfg.get("cfg_drop", ()) or ())
         # `flow_time: {independent: true, ...}` -- UWM's training scheme, see _forward_train
         self.flow_time = dict(cfg.get("flow_time") or {})
+        self.time_groups = self._build_time_groups(self.flow_time.get("groups"))
         clamp = cfg.get("inference_clamp")
         self.inference_clamp = {str(n): float(t) for n, t in dict(clamp).items()} if clamp else None
         inf = cfg.get("inference_streams")
@@ -884,12 +885,44 @@ class GenericViTPredictor(PredictiveModel):
             target[n] = torch.where(rows.view(-1, 1, 1), pred[n].detach(), target[n])
         return pred, target
 
+    def _build_time_groups(self, groups):
+        """`flow_time.groups` -> a list of stream-name lists, one per independent time draw.
+
+        Streams in one group share every draw, endpoint pins included; every other flow
+        stream is its own group. UWM noises all observation modalities with ONE time, so
+        two cameras' futures belong together: drawn apart, policy mode -- every future at
+        noise -- is the product of their pin probabilities, a sliver of training.
+        """
+        flow = list(self.predictor.flow_names)
+        listed = [[str(n) for n in group] for group in (groups or [])]
+        seen = {}
+        for group in listed:
+            for name in group:
+                if name not in flow:
+                    raise ValueError(
+                        f"flow_time.groups names '{name}', not a flow stream ({flow})"
+                    )
+                if name in seen:
+                    raise ValueError(f"flow_time.groups lists '{name}' twice")
+                seen[name] = group
+            if len(group) < 2:
+                raise ValueError(f"flow_time.groups entry {group} groups nothing")
+            for key in ("noise_prob", "clean_prob"):
+                value = self.flow_time.get(key)
+                if hasattr(value, "get") and len({value.get(n, 0.0) for n in group}) > 1:
+                    raise ValueError(
+                        f"flow_time.{key} gives the members of group {group} different "
+                        f"probabilities, but a group shares one draw"
+                    )
+        return listed + [[n] for n in flow if n not in seen]
+
     def _sample_independent_time(self, flow):
-        """One t per flow stream per row (UWM). Each draw follows the usual schedule, and
-        then with `noise_prob` is pinned to t=0 and with `clean_prob` to t=1 -- the two
-        endpoints every inference mode sets a stream to (a future marginalized at noise,
-        or actions / future handed in clean), which a continuous draw would almost never
-        visit. Both may be a float for every stream or a {stream: p} map.
+        """One t per time group per row (UWM; see `_build_time_groups`). Each draw follows
+        the usual schedule, and then with `noise_prob` is pinned to t=0 and with
+        `clean_prob` to t=1 -- the two endpoints every inference mode sets a stream to (a
+        future marginalized at noise, or actions / future handed in clean), which a
+        continuous draw would almost never visit. Both may be a float for every stream or a
+        {stream: p} map.
         """
         cfg = self.flow_time
         ref = next(iter(flow.values()))
@@ -900,13 +933,16 @@ class GenericViTPredictor(PredictiveModel):
             return float(value.get(name, 0.0) if hasattr(value, "get") else value)
 
         out = {}
-        for name in flow:
+        for group in self.time_groups:
+            members = [n for n in group if n in flow]
+            if not members:
+                continue
             t = sample_flow_time(B, device)
             u = torch.rand(B, device=device)
-            p_noise, p_clean = prob("noise_prob", name), prob("clean_prob", name)
+            p_noise, p_clean = prob("noise_prob", members[0]), prob("clean_prob", members[0])
             t = torch.where(u < p_noise, torch.zeros_like(t), t)
             t = torch.where((u >= p_noise) & (u < p_noise + p_clean), torch.ones_like(t), t)
-            out[name] = t
+            out.update({name: t for name in members})
         return out
 
     def _forward_integrate(self, clean, sources, cond, seeds, num_steps):
@@ -952,6 +988,13 @@ class GenericViTPredictor(PredictiveModel):
         clamp = clamp if clamp is not None else self.inference_clamp
         if not clamp:
             return None
+        for group in self.time_groups:
+            pinned = {float(clamp[n]) for n in group if n in clamp}
+            if pinned and (len(pinned) > 1 or not all(n in clamp for n in group)):
+                raise ValueError(
+                    f"clamp {dict(clamp)} pins time group {group} only in part; its members "
+                    f"share one time in training, so pin all of them, at one t, or none"
+                )
         out = {}
         for name, t in clamp.items():
             value = None
