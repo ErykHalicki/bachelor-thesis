@@ -12,6 +12,7 @@ pin_memory: true
 augment_on: device
 log_every: 1
 mixed_precision: fp16           # "no" | fp16 | bf16. fp16: the V100 has no bf16 tensor cores
+grad_clip: 1.0                  # max grad norm; null disables
 recompute_norm_stats: false
 
 lr_warmup_steps: 500

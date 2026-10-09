@@ -21,4 +21,6 @@ slices:
 
 normalize:
   keys: [action, qpos, qvel]
-  method: mean_std
+  # mean_std sent the rare saturated (+-1) steps of the near-still action dims to 45 std
+  method: percentile
+  percentiles: [1, 99]
