@@ -39,22 +39,12 @@ conditioning:
   front_context: {encoder: bn_front, grid: [1, 1]}
   wrist_context: {encoder: bn_wrist, grid: [1, 1]}
 
-# A2A seeding (arXiv:2602.07322) on the video only: each future flows from its own camera's
-# newest context latent instead of from a Gaussian, so v = 0 already
-# predicts persistence -- held out, persistence explained ~80% (front) / ~40% (wrist) of the
-# future latent's variance -- and the field only learns the change. The seed is detached:
-# with gradient through both the seed and the target, the encoder collapsed the front camera's
-# latent over time (temporal variance 0.20 -> 0.04 by step 2.5k), the cheapest way to shrink
-# x1 - seed. The action stream keeps its Gaussian x0.
+# No A2A seed on the futures: with the encoder trainable, seeding each future from its current
+# latent pulled consecutive frames together (front temporal variance 0.20 -> 0.04, 0.09 even
+# with the seed detached). BatchNorm alone fixes the scale mismatch that motivated it.
 predict:
-  front_future:
-    encoder: bn_front
-    grid: [1, 1]
-    source: {stream: front_context, rows: "-1", detach: true}
-  wrist_future:
-    encoder: bn_wrist
-    grid: [1, 1]
-    source: {stream: wrist_context, rows: "-1", detach: true}
+  front_future: {encoder: bn_front, grid: [1, 1]}
+  wrist_future: {encoder: bn_wrist, grid: [1, 1]}
 
 model:
   # positions are token order alone: every head dim rotates on `seq`, nothing on time.
