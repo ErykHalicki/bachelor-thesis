@@ -17,13 +17,18 @@ def build_optimizer(params, cfg):
     return _OPTIMIZERS[name](params, **kwargs)
 
 
-def build_lr_scheduler(optimizer, warmup_steps, total_steps):
-    """Linear warmup then cosine decay to 0 — the Diffusion Policy schedule."""
+def build_lr_scheduler(optimizer, warmup_steps, total_steps, schedule="cosine"):
+    """Linear warmup then cosine decay to 0 — the Diffusion Policy schedule — or, with
+    `schedule="constant"`, warmup then a flat LR (OCBench's Adam at 1e-4)."""
     import math
+
+    assert schedule in ("cosine", "constant"), f"unknown lr schedule '{schedule}'"
 
     def fn(step):
         if step < warmup_steps:
             return (step + 1) / max(1, warmup_steps)
+        if schedule == "constant":
+            return 1.0
         p = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return 0.5 * (1 + math.cos(math.pi * min(p, 1.0)))
 

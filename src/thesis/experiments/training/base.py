@@ -74,7 +74,8 @@ class TrainingMixin:
         )
         loader = acc.prepare(loader)
         total_steps = exp.max_steps
-        sched = build_lr_scheduler(opt, exp.get("lr_warmup_steps", 0), total_steps)
+        sched = build_lr_scheduler(opt, exp.get("lr_warmup_steps", 0), total_steps,
+                                   exp.get("lr_schedule", "cosine"))
         # on resume the scheduler is fresh while the optimizer state is not: fast-forward
         # it, or the LR re-enters warmup at the resume point
         for _ in range(start_step):

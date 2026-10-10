@@ -72,6 +72,7 @@ def build_dataset(cfg, norm_stats_override=None, augment=True, split=None,
             keys=list(norm_cfg["keys"]),
             method=method,
             percentiles=norm_cfg.get("percentiles"),
+            clip=norm_cfg.get("clip"),
             stats=stats,
         )
 

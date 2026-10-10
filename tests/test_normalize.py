@@ -59,6 +59,22 @@ def test_percentile_does_not_clamp_outliers():
     assert torch.allclose(norm.unnormalize("x", normalized), outlier)
 
 
+def test_percentile_clip_clamps_both_ways():
+    """A `clip` in the stats caps normalized values, and what `unnormalize` will emit."""
+    stats = {"x": {"q_lo": [-2.0, 0.0], "q_hi": [2.0, 10.0], "clip": 5.0}}
+    norm = Normalizer(stats, method="percentile")
+    assert torch.equal(norm.normalize("x", torch.tensor([100.0, -100.0])), torch.tensor([5.0, -5.0]))
+    assert torch.allclose(norm.unnormalize("x", torch.tensor([9.0, -9.0])), torch.tensor([10.0, -20.0]))
+
+
+def test_normalized_source_stores_clip_in_stats():
+    values = [torch.tensor([[float(i)]]) for i in range(101)]
+    source = NormalizedSource(_ToyDataset(values), keys=["x"], method="percentile",
+                              percentiles=[1, 99], clip=5.0)
+    assert source.stats["x"]["clip"] == 5.0
+    assert source[100]["x"].item() <= 5.0
+
+
 def test_compute_stats_adds_quantiles_when_requested():
     values = [torch.tensor([[float(i)]]) for i in range(101)]
     stats = compute_stats(_ToyDataset(values), keys=["x"], percentiles=[1, 99])

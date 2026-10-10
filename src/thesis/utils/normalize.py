@@ -110,10 +110,11 @@ class Normalizer:
             span = (s["max"] - s["min"]).clamp_min(1e-8)
             return (tensor - s["min"]) / span * 2 - 1
         if self.method == "percentile":
-            # not clamped: the tails outside q_lo/q_hi are real data, and clamping them
-            # also caps what `unnormalize` can emit
+            # clamped only when the stats carry a `clip` (OCBench's pi0.5 scheme, +-5): the
+            # tails outside q_lo/q_hi are real data, and clamping also caps `unnormalize`
             span = (s["q_hi"] - s["q_lo"]).clamp_min(1e-8)
-            return (tensor - s["q_lo"]) / span * 2 - 1
+            out = (tensor - s["q_lo"]) / span * 2 - 1
+            return out.clamp(-s["clip"], s["clip"]) if "clip" in s else out
         raise ValueError(f"unknown normalization method '{self.method}'")
 
     def unnormalize(self, key, tensor):
@@ -126,6 +127,8 @@ class Normalizer:
             span = (s["max"] - s["min"]).clamp_min(1e-8)
             return (tensor + 1) / 2 * span + s["min"]
         if self.method == "percentile":
+            if "clip" in s:
+                tensor = tensor.clamp(-s["clip"], s["clip"])
             span = (s["q_hi"] - s["q_lo"]).clamp_min(1e-8)
             return (tensor + 1) / 2 * span + s["q_lo"]
         raise ValueError(f"unknown normalization method '{self.method}'")
@@ -142,7 +145,7 @@ class NormalizedSource:
     """
 
     def __init__(self, dataset, keys, method="mean_std", max_samples=2000, stats=None,
-                 percentiles=None):
+                 percentiles=None, clip=None):
         self.dataset = dataset
         self.provided_modalities = dataset.provided_modalities
         self.method = method
@@ -150,6 +153,11 @@ class NormalizedSource:
         self.stats = stats if stats is not None else compute_stats(
             dataset, keys, max_samples=max_samples, percentiles=pct
         )
+        if clip is not None and stats is None:
+            # stored in the stats so it travels with the checkpoint to eval
+            for key in keys:
+                if key in self.stats:
+                    self.stats[key]["clip"] = float(clip)
         self.normalizer = Normalizer(self.stats, method=method)
 
     def __len__(self):

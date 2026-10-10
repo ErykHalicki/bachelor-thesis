@@ -1,0 +1,29 @@
+# OCBench's published visual-block-single-task1-v0 data, as its paper trains on it: 100 shards
+# of 100 episodes, front/side/wrist at 224 px, one frame set per 25-step chunk. Frames are
+# memory-mapped from `<shard>-pixels.npy` (extracted beside each downloaded .npz): inline
+# they would load 1.4 GB per shard into RAM.
+defaults:
+  - ocbench_base
+  - _self_
+
+env_name: block-single-task1-v0   # the eval renders the cameras from the state env itself
+dataset_path: ${oc.env:HOME}/.cache/ocbench/datasets/visual/visual-block-single-task1-v0
+cameras: [front, side, wrist]
+# the shards' own -val.npz files are skipped; a small slice of train scores held-out loss
+validation_split: 0.01
+
+# their pi0.5 scheme: 1st/99th percentile -> -1/1, clipped to +-5 (the gripper's percentiles
+# are its -1/1 limits already, which their normalizer hard-codes)
+normalize:
+  keys: [action]
+  method: percentile
+  percentiles: [1, 99]
+  clip: 5.0
+
+# their random crop pads 3 px and shifts (p_aug 0.5); ours crops and resizes back, so
+# a 218/224 side fraction gives the same up-to-6 px offset
+augment:
+  seed: null
+  streams:
+    "observation.images.*":
+      random_crop: {scale: [0.973, 1.0], p: 0.5}

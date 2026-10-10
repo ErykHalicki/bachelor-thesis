@@ -1,0 +1,79 @@
+# The OCBench paper's pixel flow BC (Park et al., App. D.1) in this repo's model system: the
+# baseline the visual UWM runs are judged against. Like theirs it sees ONLY the three current
+# camera frames -- no proprio, no action history -- through one encoder shared by every
+# camera, pooled to one global vector per frame, and flow-matches a 25-step action chunk.
+#
+# What stays ours: an ImageNet ResNet18 (theirs: ConvNeXt V2-N from scratch), and the
+# transformer trunk over 3 camera tokens + 25 action tokens (theirs: a [4096]x8 ResMLP on
+# the concatenated features).
+name: generic_vit_predictor
+
+action_dim: 7
+chunk_len: 25
+action_fps: 50          # OCBench control rate: 0.02 s per step
+video_fps: 2            # one frame per 25-step chunk
+action_index: "0..24"
+
+model:
+  model_dim: 512
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  rope:
+    time: {share: 0.6, period: auto}
+    seq:  {share: 0.4, period: auto}
+
+num_flow_steps: 10
+inference_streams: null
+execute_len: ${algorithm.chunk_len}
+
+encoders:
+  resnet:
+    type: resnet
+    variant: resnet18
+    weights: pretrained
+    pooling: avg        # one 512-d vector per frame, as their ConvNeXt's global mean
+    frozen: false
+
+conditioning:
+  front_context:
+    from: observation.images.front
+    encoder: resnet
+    dim: 512
+    index: "0"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+  side_context:
+    from: observation.images.side
+    encoder: resnet
+    dim: 512
+    index: "0"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+  wrist_context:
+    from: observation.images.wrist
+    encoder: resnet
+    dim: 512
+    index: "0"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+
+predict:
+  action:
+    from: action
+    type: flow
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    block_size: ${algorithm.chunk_len}
+    token_in:
+      type: mlp
+      mlp_dim: ${algorithm.model.model_dim}
+    token_out: {type: mlp, mlp_dim: 64}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  # observed only (weight 0): the integrated endpoints, scored on held-out batches
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

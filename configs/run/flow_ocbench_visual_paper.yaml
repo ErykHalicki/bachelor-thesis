@@ -1,0 +1,37 @@
+# @package _global_
+# The OCBench paper's pixel flow BC setup (App. D, Table 2) on its own visual dataset, in
+# this repo's model system -- the sanity baseline for the visual UWM runs:
+#
+#   python main.py run=flow_ocbench_visual_paper
+#
+# Matched: 3 cams at 224 px, images only, Adam at a constant 1e-4, batch 256, 250K steps,
+# no gradient clipping, percentile action norm clipped at +-5, random-crop augmentation.
+defaults:
+  - override /dataset: ocbench_block_single_visual_official
+  - override /algorithm: flow_ocbench_visual_paper
+  - override /eval: ocbench
+
+best_metric: success_rate
+best_mode: max
+
+experiment:
+  batch_size: auto
+  effective_batch: 256
+  max_steps: 250000
+  eval_every: 25000
+  save_every: 25000
+  log_every: 100
+  lr_warmup_steps: 0
+  lr_schedule: constant
+  grad_clip: null
+  optimizer:
+    name: adam
+    lr: 1.0e-4
+    weight_decay: 0.0
+
+eval:
+  episodes: 500
+  num_envs: 250
+  pixel_cameras: [front, side, ur5e/wrist]
+  pixel_size: 224
+  pixel_interval: 25
