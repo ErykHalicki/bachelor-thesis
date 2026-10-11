@@ -31,5 +31,6 @@ eval:
   episodes: 500
   num_envs: 250
   pixel_cameras: [front, ur5e/wrist]
+  cameras: [front, wrist]   # names for the rendered views, in pixel_cameras order
   pixel_size: 224
   pixel_interval: 25
