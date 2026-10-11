@@ -1,0 +1,13 @@
+# @package _global_
+# Ablation arm: + the arm's current qpos only (configs/algorithm/flow_ocbench_visual_paper_qpos.yaml),
+# to split abl_proprio's drop between proprio itself and its velocity/history
+defaults:
+  - abl_ocbench_visual_base
+  - override /algorithm: flow_ocbench_visual_paper_qpos
+  - _self_
+
+dataset:
+  slices:
+    qpos: "qpos.[0-9], qpos.1[0-3]"
+  normalize:
+    keys: [action, qpos]

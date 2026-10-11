@@ -1,0 +1,12 @@
+# Ablation: flow_ocbench_visual_paper plus the arm's current joint positions only -- no qvel and
+# no history, so the policy gets where the arm is but not how it is moving.
+defaults:
+  - flow_ocbench_visual_paper
+  - _self_
+
+conditioning:
+  qpos_context:
+    from: qpos
+    dim: 14
+    index: "0"
+    fps: ${algorithm.action_fps}
