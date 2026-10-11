@@ -1,0 +1,7 @@
+# @package _global_
+# Ablation arm: + the UWM objectives (next-frame flow streams, independent flow times) with
+# BatchNorm + SIGReg on the latents (configs/algorithm/flow_ocbench_visual_paper_uwm.yaml)
+defaults:
+  - abl_ocbench_visual_base
+  - override /algorithm: flow_ocbench_visual_paper_uwm
+  - _self_

@@ -1,0 +1,73 @@
+# Ablation: flow_ocbench_visual_paper trained with the visual UWM runs' objectives -- each
+# camera's next frame (25 steps on) predicted as a flow stream with its own time, policy mode
+# at inference -- and their latent regularization: a parameter-free BatchNorm on the pooled
+# latent, SIGReg (0.1) over each camera's context + future. The pooling stays the global average.
+defaults:
+  - flow_ocbench_visual_paper
+  - _self_
+
+flow_time:
+  independent: true
+  noise_prob: 0.1
+  clean_prob: 0.1
+  groups:
+    - [front_future, side_future, wrist_future]
+
+inference_clamp:
+  front_future: 0.0
+  side_future: 0.0
+  wrist_future: 0.0
+
+encoders:
+  bn: {type: batchnorm, input: resnet, dim: 512}
+
+conditioning:
+  front_context: {encoder: bn}
+  side_context:  {encoder: bn}
+  wrist_context: {encoder: bn}
+
+predict:
+  front_future:
+    from: observation.images.front
+    encoder: bn
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+  side_future:
+    from: observation.images.side
+    encoder: bn
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+  wrist_future:
+    from: observation.images.wrist
+    encoder: bn
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [1, 1]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: flow, stream: front_future, weight: 1.0}
+  - {type: flow, stream: side_future, weight: 1.0}
+  - {type: flow, stream: wrist_future, weight: 1.0}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal, streams: [front_context, front_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal, streams: [side_context, side_future]}
+  - {type: sigreg, weight: 0.1, statistic: per_timestep, concat: temporal, streams: [wrist_context, wrist_future]}
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

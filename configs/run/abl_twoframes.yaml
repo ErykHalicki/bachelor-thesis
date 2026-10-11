@@ -1,0 +1,11 @@
+# @package _global_
+# Ablation arm: each camera sees two frames, 25 steps apart, as the visual UWM runs did
+defaults:
+  - abl_ocbench_visual_base
+  - _self_
+
+algorithm:
+  conditioning:
+    front_context: {index: "-1..0", raw_index: "-25, 0"}
+    side_context:  {index: "-1..0", raw_index: "-25, 0"}
+    wrist_context: {index: "-1..0", raw_index: "-25, 0"}

@@ -1,0 +1,35 @@
+# @package _global_
+# Ablation control: the full plateaued recipe (uwm_ocbench_pooled_unfrozen_block_single, 2-8%)
+# on the OCBench published data instead of our own collection. Front + wrist only, frames
+# resized 224 -> 256 so the ResNet grid is the 8x8 its pools expect, arm qpos/qvel, no
+# augmentation, unclipped percentile norm, AdamW. Near 5%: the data was not the cause.
+defaults:
+  - uwm_ocbench_pooled_unfrozen_block_single
+  - override /dataset: ocbench_block_single_visual_official
+  - _self_
+
+dataset:
+  image_size: [256, 256]
+  slices:
+    qpos: "qpos.[0-9], qpos.1[0-3]"
+    qvel: "qvel.[0-9], qvel.1[0-3]"
+  normalize:
+    keys: [action, qpos, qvel]
+    clip: null
+  augment: null
+
+experiment:
+  batch_size: 64
+  effective_batch: 256
+  max_steps: 12500
+  eval_every: 6250
+  save_every: 6250
+  # the plateaued runs' cosine ran over 200K steps, still ~flat by 12.5K
+  lr_schedule: constant
+
+eval:
+  episodes: 500
+  num_envs: 250
+  pixel_cameras: [front, ur5e/wrist]
+  pixel_size: 224
+  pixel_interval: 25

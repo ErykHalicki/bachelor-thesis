@@ -1,0 +1,21 @@
+# Ablation: flow_ocbench_visual_paper with the visual UWM runs' pooling -- each camera's ResNet
+# grid through its own 1-query attentive pool, then a parameter-free BatchNorm -- in place of
+# the global average. (No SIGReg: that came with the UWM objectives, ablated separately.)
+defaults:
+  - flow_ocbench_visual_paper
+  - _self_
+
+encoders:
+  resnet:
+    pooling: grid       # (224 / 32)^2 = a 7x7 grid per frame
+  pool_front: {type: attentive_pool, input: resnet, in_dim: 512, out_dim: 512, tokens_per_step: 49, num_queries: 1}
+  pool_side:  {type: attentive_pool, input: resnet, in_dim: 512, out_dim: 512, tokens_per_step: 49, num_queries: 1}
+  pool_wrist: {type: attentive_pool, input: resnet, in_dim: 512, out_dim: 512, tokens_per_step: 49, num_queries: 1}
+  bn_front: {type: batchnorm, input: pool_front, dim: 512}
+  bn_side:  {type: batchnorm, input: pool_side, dim: 512}
+  bn_wrist: {type: batchnorm, input: pool_wrist, dim: 512}
+
+conditioning:
+  front_context: {encoder: bn_front}
+  side_context:  {encoder: bn_side}
+  wrist_context: {encoder: bn_wrist}

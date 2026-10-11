@@ -1,0 +1,7 @@
+# @package _global_
+# Ablation arm: 1-query attentive pool + BatchNorm per camera in place of the global average
+# (configs/algorithm/flow_ocbench_visual_paper_attnpool.yaml)
+defaults:
+  - abl_ocbench_visual_base
+  - override /algorithm: flow_ocbench_visual_paper_attnpool
+  - _self_

@@ -1,0 +1,17 @@
+# @package _global_
+# Ablation arm: the visual UWM runs' optimization -- AdamW (wd 1e-3), 1K-step warmup, grad clip
+# 1.0, unclipped percentile action norm -- in place of the paper's Adam at a constant 1e-4
+defaults:
+  - abl_ocbench_visual_base
+  - _self_
+
+experiment:
+  lr_warmup_steps: 1000
+  grad_clip: 1.0
+  optimizer:
+    name: adamw
+    weight_decay: 1.0e-3
+
+dataset:
+  normalize:
+    clip: null

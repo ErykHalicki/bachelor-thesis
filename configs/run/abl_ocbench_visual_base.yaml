@@ -1,0 +1,16 @@
+# @package _global_
+# Ablation base: flow_ocbench_visual_paper (47% success at 12.5K steps) cut to 12.5K steps with
+# evals at 6.25K and 12.5K, and a fixed 64 x 4 micro-batch so two arms share the V100. Each
+# abl_* arm adds back ONE thing the visual UWM runs (2-8%) had:
+#
+#   python main.py run=abl_ocbench_visual_base <arm overrides>
+defaults:
+  - flow_ocbench_visual_paper
+  - _self_
+
+experiment:
+  batch_size: 64
+  effective_batch: 256
+  max_steps: 12500
+  eval_every: 6250
+  save_every: 6250

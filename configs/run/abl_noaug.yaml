@@ -1,0 +1,8 @@
+# @package _global_
+# Ablation arm: no random-crop augmentation, as the visual UWM runs trained
+defaults:
+  - abl_ocbench_visual_base
+  - _self_
+
+dataset:
+  augment: null

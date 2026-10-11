@@ -1,0 +1,14 @@
+# @package _global_
+# Ablation arm: + the arm's qpos/qvel (configs/algorithm/flow_ocbench_visual_paper_proprio.yaml)
+defaults:
+  - abl_ocbench_visual_base
+  - override /algorithm: flow_ocbench_visual_paper_proprio
+  - _self_
+
+dataset:
+  # the robot's joints only -- qpos/qvel 0..13 -- not the cube's free joint
+  slices:
+    qpos: "qpos.[0-9], qpos.1[0-3]"
+    qvel: "qvel.[0-9], qvel.1[0-3]"
+  normalize:
+    keys: [action, qpos, qvel]

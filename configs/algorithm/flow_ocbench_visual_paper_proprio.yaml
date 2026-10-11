@@ -1,0 +1,17 @@
+# Ablation: flow_ocbench_visual_paper plus the arm's own state, as the visual UWM runs fed it --
+# qpos/qvel of the 6 arm + 8 gripper joints (not the cube) over the last two steps.
+defaults:
+  - flow_ocbench_visual_paper
+  - _self_
+
+conditioning:
+  qpos_context:
+    from: qpos
+    dim: 14
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+  qvel_context:
+    from: qvel
+    dim: 14
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
