@@ -250,10 +250,13 @@ class GenericViTTrunk(nn.Module):
         pos = {axis: torch.cat([p[axis] for p in pos_parts]) for axis in pos_parts[0]}
         pos["seq"] = torch.arange(self.num_tokens, dtype=torch.float32)
         self.rope = RopeND(dim_head or model_dim // num_heads, axes_from_positions(pos, rope))
+        # `seq` alone also places a grid: every token, every patch included, gets its own
+        # position, and the grid's flattening order is fixed, so the patch layout is learnable
         dropped = [a for a in ("height", "width") if pos[a].any() and a not in self.rope.axes]
-        assert not dropped, (
+        assert not dropped or "seq" in self.rope.axes, (
             f"a stream declares a grid, but model.rope leaves {dropped} out of "
-            f"{list(self.rope.axes)}: its patch coordinates would be dropped silently"
+            f"{list(self.rope.axes)} and has no `seq` axis: its patch coordinates would be "
+            f"dropped silently"
         )
         # every axis registered, not just rope-active ones: `_cond_map` reads `pos_time`
         # whether or not time rotates

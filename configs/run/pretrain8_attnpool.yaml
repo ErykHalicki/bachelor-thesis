@@ -1,0 +1,16 @@
+# @package _global_
+# Pretraining on the 8-task mix (configs/dataset/ocbench_multi8_visual.yaml) with the
+# abl_attnpool recipe, to be finetuned on block-single-task1 with experiment.init_from
+defaults:
+  - abl_attnpool
+  - override /dataset: ocbench_multi8_visual
+  - _self_
+
+eval:
+  episodes: 200
+  num_envs: 200
+
+experiment:
+  max_steps: 200000
+  eval_every: 25000
+  save_every: 12500

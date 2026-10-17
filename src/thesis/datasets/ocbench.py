@@ -45,11 +45,13 @@ DEFAULT_CAMERAS = ("front", "side", "wrist")
 
 def resolve_paths(cfg):
     """The training `.npz` files `cfg` names, downloading them from the OCBench hub
-    release when it names none.
+    release when it names none, and each file's source: its index in a `dataset_path`
+    list (all 0 for a single path).
 
-    `dataset_path` is one file, a directory, or a glob. A directory or glob skips the
-    `-val.npz` files beside each shard: OCBench's validation draws are its own
-    distribution, and the held-out split here comes from `validation_split` instead.
+    `dataset_path` is one file, a directory, or a glob, or a list of those (one source per
+    task of a multi-task mix). A directory or glob skips the `-val.npz` files beside each
+    shard: OCBench's validation draws are its own distribution, and the held-out split
+    here comes from `validation_split` instead.
     """
     path = cfg.get("dataset_path")
     if path is None:
@@ -58,13 +60,25 @@ def resolve_paths(cfg):
         paths, _ = ocbench.download_datasets(
             cfg.env_name, cfg.get("dataset_root"), cfg.get("num_shards")
         )
-        return [str(p) for p in paths]
-    path = os.path.expanduser(str(path))
+        return [str(p) for p in paths], [0] * len(paths)
+    if isinstance(path, (str, os.PathLike)):
+        paths = _resolve_one(path, cfg)
+        return paths, [0] * len(paths)
+    paths, sources = [], []
+    for i, p in enumerate(path):
+        found = _resolve_one(p, cfg)
+        paths += found
+        sources += [i] * len(found)
+    return paths, sources
+
+
+def _resolve_one(given, cfg):
+    path = os.path.expanduser(str(given))
     if os.path.isdir(path):
         path = os.path.join(path, "*.npz")
     paths = sorted(p for p in glob.glob(path) if not p.endswith("-val.npz"))
     if not paths:
-        raise FileNotFoundError(f"no OCBench .npz files at '{cfg.get('dataset_path')}'")
+        raise FileNotFoundError(f"no OCBench .npz files at '{given}'")
     num_shards = cfg.get("num_shards")
     return paths[: int(num_shards)] if num_shards is not None else paths
 
@@ -110,8 +124,8 @@ class OCBenchSource(BaseSource):
 
     Config knobs:
       env_name       OCBench environment the data comes from (and the eval rolls out in).
-      dataset_path   a `.npz` file, a directory of them, or a glob; null downloads the
-                     env's published datasets into `dataset_root`.
+      dataset_path   a `.npz` file, a directory of them, or a glob, or a list of those;
+                     null downloads the env's published datasets into `dataset_root`.
       dataset_root   download directory (default: OCBench's own cache).
       num_shards     keep the first N training shards, in filename order.
       success_only   keep only episodes that reach the goal (default true, as OCBench
@@ -121,6 +135,8 @@ class OCBenchSource(BaseSource):
                      success filter; null keeps all.
       max_episodes   keep only the first N episodes left after those filters (and before
                      the split), so a dataset collected past a target size trains at it.
+                     With a `dataset_path` list, N per entry: a mix with equal episodes
+                     per task.
       validation_split / validation_split_seed
                      as on the lerobot backend: a seeded shuffle of the kept episodes.
       columns        `{from_key: column}` remap; default identity.
@@ -140,7 +156,7 @@ class OCBenchSource(BaseSource):
         self._image_size = tuple(int(v) for v in size) if size else None
         cameras = [str(c) for c in (cfg.get("cameras") or DEFAULT_CAMERAS)]
 
-        paths = resolve_paths(cfg)
+        paths, file_sources = resolve_paths(cfg)
         tables = [episode_table(p) for p in paths]
         intervals = {interval for _, _, interval in tables}
         if len(intervals) != 1:
@@ -155,12 +171,18 @@ class OCBenchSource(BaseSource):
         if requested is not None:
             keep = np.array(sorted(set(keep.tolist()) & {int(e) for e in requested}), dtype=int)
         if cfg.get("max_episodes") is not None:
-            if len(keep) < int(cfg.max_episodes):
-                raise ValueError(
-                    f"max_episodes={cfg.max_episodes} but only {len(keep)} episodes of "
-                    f"{paths} pass the success/episode filters"
-                )
-            keep = keep[: int(cfg.max_episodes)]
+            sources = np.repeat(file_sources, [len(lengths) for lengths, _, _ in tables])
+            capped = []
+            for source in sorted(set(file_sources)):
+                kept = keep[sources[keep] == source]
+                if len(kept) < int(cfg.max_episodes):
+                    named = [p for p, s in zip(paths, file_sources) if s == source]
+                    raise ValueError(
+                        f"max_episodes={cfg.max_episodes} but only {len(kept)} episodes of "
+                        f"{named} pass the success/episode filters"
+                    )
+                capped.append(kept[: int(cfg.max_episodes)])
+            keep = np.concatenate(capped)
         if not len(keep):
             raise ValueError(f"no episodes left of {paths} after the success/episode filters")
         if split is not None:

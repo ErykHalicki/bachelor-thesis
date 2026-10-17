@@ -1,0 +1,8 @@
+# @package _global_
+# Ablation arm: abl_attnpool + UWM's objectives against a frozen ResNet18 grid target
+# (configs/algorithm/flow_ocbench_visual_paper_uwm_frozen.yaml). Wants the whole V100:
+#   sbatch -J uwm_frozen --gres=gpu:v100:1 ~/ocb_bench/slurm/abl.sbatch run=abl_uwm_frozen
+defaults:
+  - abl_ocbench_visual_base
+  - override /algorithm: flow_ocbench_visual_paper_uwm_frozen
+  - _self_

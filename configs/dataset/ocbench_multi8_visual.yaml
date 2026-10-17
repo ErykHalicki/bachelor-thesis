@@ -1,0 +1,24 @@
+# 8-task visual pretraining mix, 500 successful episodes per task (4K total), rendered like
+# OCBench's visual release (front/side/wrist at 224 px, one frame set per 25-step chunk) by
+# scripts/collect_ocbench_visual.py into <task_root>/<task>/. block-single-task1, the
+# finetuning target, is held out. One task per scene, since nothing tells the policy which
+# goal of a scene it is after. Long tasks contribute more decision points (chamber ~4K
+# steps an episode, hanoi-single ~700): episodes are balanced, samples are not.
+defaults:
+  - ocbench_block_single_visual_official
+  - _self_
+
+# the rollout eval runs in one of the pretraining tasks (short episodes)
+env_name: hanoi-single-task1-v0
+task_root: ${oc.env:HOME}/data/ocbench_multi8
+dataset_path:
+  - ${..task_root}/switch-4x4-task1
+  - ${..task_root}/hanoi-single-task1
+  - ${..task_root}/switch-3x3-task1
+  - ${..task_root}/block-double-task1
+  - ${..task_root}/hanoi-double-task1
+  - ${..task_root}/block-triple-task1
+  - ${..task_root}/chamber-easy-task2
+  - ${..task_root}/chamber-medium-task1
+max_episodes: 500
+validation_split: 0.02

@@ -1,0 +1,72 @@
+# Ablation: the attnpool arm (best of the OCBench visual ablations) trained with UWM's
+# objectives as the reference code has them -- each camera's next frame (25 steps on, the
+# chunk's end) predicted as a flow stream with its own time, policy mode at inference -- but
+# with the target from a FROZEN ImageNet ResNet18's 7x7 grid, as UWM's target is a frozen VAE
+# latent (7x7 patch tokens per view). No SIGReg, no endpoint pinning, and the action and
+# dynamics losses weighted equally (the three cameras share the dynamics weight).
+defaults:
+  - flow_ocbench_visual_paper_attnpool
+  - _self_
+
+model:
+  rope:
+    time: null
+    seq: {share: 1.0, period: auto}
+
+flow_time:
+  independent: true
+  groups:
+    - [front_future, side_future, wrist_future]
+
+inference_clamp:
+  front_future: 0.0
+  side_future: 0.0
+  wrist_future: 0.0
+
+encoders:
+  resnet_target: {type: resnet, variant: resnet18, weights: pretrained, pooling: grid, frozen: true}
+  # parameter-free: standardizes the post-ReLU features to the flow noise's scale
+  bn_target: {type: batchnorm, input: resnet_target, dim: 512}
+
+predict:
+  front_future:
+    from: observation.images.front
+    encoder: bn_target
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [7, 7]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+  side_future:
+    from: observation.images.side
+    encoder: bn_target
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [7, 7]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+  wrist_future:
+    from: observation.images.wrist
+    encoder: bn_target
+    type: flow
+    dim: 512
+    index: "1"
+    raw_index: "25"
+    fps: ${algorithm.video_fps}
+    grid: [7, 7]
+    token_in: {type: mlp, mlp_dim: "${algorithm.model.model_dim}"}
+    token_out: {type: mlp, mlp_dim: 1024}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}
+  - {type: flow, stream: front_future, weight: 0.3333333}
+  - {type: flow, stream: side_future, weight: 0.3333333}
+  - {type: flow, stream: wrist_future, weight: 0.3333333}
+  - {type: integration, stream: action, weight: 0.0, norm: mse}
+  - {type: integration, stream: action, weight: 0.0, norm: mse, units: raw}

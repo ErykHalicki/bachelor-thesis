@@ -479,3 +479,22 @@ def test_direct_input_tokens_are_exempt_from_role_rule():
     mask = build_algorithm(cfg).predictor.dense_mask
     assert mask[2, 3]                                      # video step 0 sees action 0
     assert not torch.any(mask[:2, 3:])
+
+
+@pytest.mark.parametrize("rope, ok", [
+    ({"seq": {"share": 1.0, "period": "auto"}}, True),
+    ({"time": {"share": 1.0, "period": "auto"}}, False),
+])
+def test_a_grid_stream_needs_height_width_or_seq_rope(rope, ok):
+    """`seq` gives every patch token its own position, so it stands in for height/width;
+    a rope with neither would drop the grid's layout."""
+    from thesis.algorithms.generic_vit_predictor import GenericViTTrunk
+    conditioning = {"ctx": {"dim": 8, "index": "0", "grid": [1, 1]}}
+    predict = {"future": {"type": "flow", "dim": 8, "index": "1", "grid": [2, 2]}}
+    model = {**MODEL, "rope": rope}
+    if ok:
+        trunk = GenericViTTrunk(conditioning, predict, **model)
+        assert trunk.num_tokens == 1 + 4
+    else:
+        with pytest.raises(AssertionError, match="no `seq` axis"):
+            GenericViTTrunk(conditioning, predict, **model)

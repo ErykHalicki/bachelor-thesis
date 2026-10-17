@@ -294,3 +294,15 @@ def test_max_episodes_caps_the_kept_episodes_before_the_split(data_dir):
     assert dataset.episodes.tolist() == [0, 1]
     with pytest.raises(ValueError, match="only 2 episodes"):
         build_dataset(_cfg(data_dir, max_episodes=3))
+
+
+def test_a_dataset_path_list_caps_max_episodes_per_entry(tmp_path):
+    for task, episodes in (("a", [(5, True), (4, True), (6, True)]), ("b", [(3, True), (7, True)])):
+        (tmp_path / task).mkdir()
+        _write(tmp_path / task / "shard-0.npz", episodes)
+    paths = [str(tmp_path / "a"), str(tmp_path / "b")]
+    dataset = build_dataset(_cfg(tmp_path, dataset_path=paths, max_episodes=2))
+    assert dataset.episodes.tolist() == [0, 1, 3, 4]
+    assert dataset._lengths.tolist() == [5, 4, 3, 7]
+    with pytest.raises(ValueError, match="only 2 episodes"):
+        build_dataset(_cfg(tmp_path, dataset_path=paths, max_episodes=3))

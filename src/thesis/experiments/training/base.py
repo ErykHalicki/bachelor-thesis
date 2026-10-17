@@ -10,7 +10,9 @@ from accelerate.utils import broadcast_object_list
 from torch.utils.data import DataLoader
 
 from ...datasets import build_dataset
-from ...utils.checkpoint import load_checkpoint, run_ckpt_dir, save_checkpoint
+from ...utils.checkpoint import (
+    load_checkpoint, load_pretrained_weights, run_ckpt_dir, save_checkpoint,
+)
 from ...utils.optim import EMA, build_lr_scheduler, build_optimizer
 from ...utils.wandb import log_eval, log_metrics, log_model_summary, read_summary, update_summary
 
@@ -39,6 +41,13 @@ class TrainingMixin:
         self._build_algo()
 
         self.algo.set_gradient_checkpointing(exp.get("gradient_checkpointing", False))
+
+        # finetuning: another run's weights and norm stats, with a fresh optimizer and step
+        # counter, unlike `load=`, which resumes those too
+        init_from = exp.get("init_from", None)
+        if init_from and not self.ckpt_path:
+            loaded, kept = load_pretrained_weights(self.algo, init_from)
+            acc.print(f"init_from {init_from}: loaded {loaded}; kept init {kept}")
 
         opt = build_optimizer(self.algo.optim_params(), exp.optimizer)
         start_step = load_checkpoint(self.algo, opt, self.ckpt_path) if self.ckpt_path else 0
