@@ -126,6 +126,10 @@ class TrainingMixin:
 
         if acc.is_main_process:
             def _on_signal(signum, frame):
+                # a second signal mid-save (Slurm repeats SIGTERM, dataloader workers
+                # die) would re-enter here and restart the save over the one in flight
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    signal.signal(sig, signal.SIG_IGN)
                 acc.print(f"received signal {signum}: saving checkpoint before exit")
                 checkpoint(step)
                 raise SystemExit(128 + signum)

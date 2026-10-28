@@ -9,7 +9,8 @@ def save_checkpoint(model, optimizer, out_dir, step, save_intermittent=False, be
     """Save weights + optimizer + step to out_dir/model.pt. If a wandb run is active, also
     log it as a 'model' artifact so `resume=`/`load=<run id>` can fetch it later.
 
-    By default only the newest artifact version plus one backup stay on wandb (older
+    Locally the previous model.pt is kept as model.prev.pt. By default the two newest
+    committed artifact versions stay on wandb, plus the one still uploading (older
     versions are pruned after each upload); `save_intermittent=True` keeps every version.
 
     `best=True` marks this as the best-scoring weights the run has produced: it writes
@@ -51,7 +52,14 @@ def save_checkpoint(model, optimizer, out_dir, step, save_intermittent=False, be
                 payload["config_yaml"] = OmegaConf.to_yaml(config, resolve=False)
         except Exception as err:  # noqa: BLE001
             print(f"checkpoint: could not embed the run config ({err}); saving without it")
-    torch.save(payload, path)
+    # write beside the target and swap it in, so a save killed mid-write leaves the old
+    # file intact; the outgoing model.pt is kept as model.prev.pt, so two recent
+    # checkpoints always sit on disk
+    tmp = path.with_suffix(".pt.tmp")
+    torch.save(payload, tmp)
+    if not best and path.exists():
+        os.replace(path, path.with_name("model.prev.pt"))
+    os.replace(tmp, path)
     print(f"saved {'best ' if best else ''}checkpoint: {path}"
           + (f"  (run {run_id})" if run_id else ""))
     aliases = ["best"] if best else (["final"] if final else None)
@@ -169,16 +177,15 @@ def _log_artifact(path, prune=True, aliases=None):
         _prune_old_versions(run_id)
 
 
-def _prune_old_versions(run_id, keep=1):
+def _prune_old_versions(run_id, keep=2):
     """Delete committed versions of this run's model artifact beyond the `keep` newest,
     never touching a version tagged `best` or `final`.
 
     The version logged just above uploads asynchronously and is not committed yet, so
-    it is never counted here: the newest committed version always survives, and an
+    it is never counted here: the newest committed versions always survive, and an
     upload killed uncleanly can only ever lose the in-flight version. A run therefore
-    holds two checkpoints at most -- the newest plus the best-scoring one, when it is
-    no longer the newest. `keep=1` rather than 2 because a pi05 checkpoint is ~20GB and
-    the spare backup costs more wandb quota than it is worth.
+    holds at least two recent checkpoints, plus the best-scoring one when it is not
+    among them. A pi05 checkpoint is ~20GB, so that backup costs real wandb quota.
 
     The `best` tag moves to a new version only once that version commits, so right after
     a best upload the previous holder can still look protected and survive one extra

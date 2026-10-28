@@ -1,5 +1,5 @@
 """Checkpoint artifact pruning exercised against a fake wandb module: default saves keep
-only the newest committed version, in-flight (uncommitted) uploads are
+the two newest committed versions, in-flight (uncommitted) uploads are
 never counted, the `best`-tagged version is never pruned, save_intermittent=True keeps
 everything, and pruning failures stay non-fatal."""
 
@@ -74,20 +74,20 @@ def run_save(tmp_path, monkeypatch, versions, **kwargs):
     return fake
 
 
-def test_prunes_all_but_newest_committed(tmp_path, monkeypatch):
+def test_prunes_all_but_two_newest_committed(tmp_path, monkeypatch):
     versions = [FakeVersion(f"v{i}") for i in range(5)]
     fake = run_save(tmp_path, monkeypatch, versions)
     assert len(fake.logged) == 1
-    assert [v.version for v in versions if v.deleted] == ["v0", "v1", "v2", "v3"]
-    assert [v.version for v in versions if not v.deleted] == ["v4"]
+    assert [v.version for v in versions if v.deleted] == ["v0", "v1", "v2"]
+    assert [v.version for v in versions if not v.deleted] == ["v3", "v4"]
 
 
 def test_uncommitted_versions_are_not_counted_or_deleted(tmp_path, monkeypatch):
-    # v4 is still uploading: the survivor must be v3, and the in-flight
+    # v4 is still uploading: the survivors must be v2 and v3, and the in-flight
     # version must never be touched
     versions = [FakeVersion(f"v{i}") for i in range(4)] + [FakeVersion("v4", state="PENDING")]
     run_save(tmp_path, monkeypatch, versions)
-    assert [v.version for v in versions if v.deleted] == ["v0", "v1", "v2"]
+    assert [v.version for v in versions if v.deleted] == ["v0", "v1"]
 
 
 def test_non_model_artifacts_are_never_touched(tmp_path, monkeypatch):
@@ -96,7 +96,7 @@ def test_non_model_artifacts_are_never_touched(tmp_path, monkeypatch):
     versions = [FakeVersion(f"v{i}") for i in range(4)] + [history]
     run_save(tmp_path, monkeypatch, versions)
     assert not history.deleted
-    assert [v.version for v in versions if v.deleted] == ["v0", "v1", "v2"]
+    assert [v.version for v in versions if v.deleted] == ["v0", "v1"]
 
 
 def test_best_version_is_never_pruned(tmp_path, monkeypatch):
@@ -104,7 +104,7 @@ def test_best_version_is_never_pruned(tmp_path, monkeypatch):
     versions = [best] + [FakeVersion(f"v{i}") for i in range(1, 5)]
     run_save(tmp_path, monkeypatch, versions)
     assert not best.deleted
-    assert [v.version for v in versions if v.deleted] == ["v1", "v2", "v3"]
+    assert [v.version for v in versions if v.deleted] == ["v1", "v2"]
 
 
 def test_best_save_writes_best_pt_and_tags_the_alias(tmp_path, monkeypatch):
@@ -127,13 +127,28 @@ def test_final_version_is_never_pruned(tmp_path, monkeypatch):
     versions = [final] + [FakeVersion(f"v{i}") for i in range(1, 5)]
     run_save(tmp_path, monkeypatch, versions)
     assert not final.deleted
-    assert [v.version for v in versions if v.deleted] == ["v1", "v2", "v3"]
+    assert [v.version for v in versions if v.deleted] == ["v1", "v2"]
 
 
 def test_ordinary_save_carries_no_alias(tmp_path, monkeypatch):
     fake = run_save(tmp_path, monkeypatch, [])
     assert (tmp_path / "model.pt").exists()
     assert fake.logged[0].aliases is None
+
+
+def test_previous_model_pt_is_kept_as_backup(tmp_path, monkeypatch):
+    run_save(tmp_path, monkeypatch, [])
+    first = (tmp_path / "model.pt").read_bytes()
+    run_save(tmp_path, monkeypatch, [])
+    assert (tmp_path / "model.prev.pt").read_bytes() == first
+    assert not (tmp_path / "model.pt.tmp").exists()
+
+
+def test_best_save_leaves_model_pt_alone(tmp_path, monkeypatch):
+    run_save(tmp_path, monkeypatch, [])
+    run_save(tmp_path, monkeypatch, [], best=True)
+    assert (tmp_path / "model.pt").exists()
+    assert not (tmp_path / "model.prev.pt").exists()
 
 
 def test_save_intermittent_keeps_every_version(tmp_path, monkeypatch):
