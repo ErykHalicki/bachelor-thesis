@@ -31,6 +31,9 @@ export WANDB_DIR=$SCRATCH/wandb/run WANDB_CACHE_DIR=$SCRATCH/wandb/cache WANDB_D
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
 
 DATA=${DATA:-ocbench_visual_256}
+# the key the staged path goes to: a multi-task dataset names its tasks under a root
+# (DATA_KEY=dataset.task_root for configs/dataset/ocbench_multi8_visual.yaml)
+DATA_KEY=${DATA_KEY:-dataset.dataset_path}
 LOCAL=${SLURM_TMPDIR:-/tmp}/thesis-data-$SLURM_JOB_ID
 trap 'rm -rf "$LOCAL"' EXIT
 mkdir -p "$LOCAL"
@@ -40,7 +43,7 @@ echo "staged $DATA to $LOCAL in $(( $(date +%s) - start ))s ($(du -sh "$LOCAL/$D
 
 echo "job $SLURM_JOB_ID on $(hostname): $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 srun .venv/bin/python main.py \
-    dataset.dataset_path=$LOCAL/$DATA \
+    $DATA_KEY=$LOCAL/$DATA \
     experiment.batch_size=auto experiment.effective_batch=256 \
     experiment.num_workers=$((SLURM_CPUS_PER_TASK - 1)) \
     wandb.mode=offline \
