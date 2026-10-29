@@ -163,7 +163,8 @@ def homing_ramp():
     gradually rather than in a couple of jumps; the real default is 2s.
     """
     config = RebotB601FollowerRobotConfig(
-        port="/dev/null", id="test", home_duration_s=0.05, gripper_close_duration_s=0.2
+        port="/dev/null", id="test", home_duration_s=0.05, gripper_close_duration_s=0.2,
+        home_joint_durations_s={}, wrist_lower_duration_s=0.2,
     )
     motors = list(config.motor_can_ids)
     ramp = follower_module._HomeRamp(config, motors, dict.fromkeys(motors, 0.0))

@@ -68,7 +68,7 @@ def test_unknown_split_name_is_rejected():
 
 def test_split_is_rejected_for_backends_without_episodes():
     cfg = OmegaConf.create({"backend": "dummy", "n": 4, "obs_dim": 2, "target_dim": 1})
-    with pytest.raises(ValueError, match="only the lerobot backend"):
+    with pytest.raises(ValueError, match="support a held-out split"):
         build_dataset(cfg, split="val")
 
 
