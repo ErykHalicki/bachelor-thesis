@@ -11,3 +11,6 @@
 [submodule "external/unified-world-model"]
 	path = external/unified-world-model
 	url = https://github.com/WEIRDLabUW/unified-world-model
+[submodule "external/levjepa"]
+	path = external/levjepa
+	url = https://github.com/MLO-lab/LeVJEPA

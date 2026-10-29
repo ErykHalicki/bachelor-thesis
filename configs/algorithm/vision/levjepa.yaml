@@ -1,0 +1,43 @@
+# @package _global_.algorithm
+
+# Frozen LeVJEPA ViT-L [cls] per frame, under the published still-image protocol (each
+# frame repeated 16x), into heads shaped like LeVJEPA's own projector (Linear 1024->2048,
+# BatchNorm, GELU, Linear 2048->256). The heads are fresh: the release ships no projector.
+# The root is frozen, so `cache_encodings` may precompute it.
+
+vision_dim: 256
+
+encoders:
+  levjepa:
+    type: levjepa
+    arch: vit_large
+    checkpoint: pretrained
+    crop_size: 224
+    pooling: cls
+    per_frame: true
+    repeat: 16
+  proj_scene:
+    type: mlp
+    input: levjepa
+    in_dim: 1024
+    hidden_dim: 2048
+    out_dim: ${algorithm.vision_dim}
+    norm: batch
+    activation: gelu
+  proj_wrist:
+    type: mlp
+    input: levjepa
+    in_dim: 1024
+    hidden_dim: 2048
+    out_dim: ${algorithm.vision_dim}
+    norm: batch
+    activation: gelu
+
+conditioning:
+  scene_context: {grid: [1, 1]}
+  wrist_context: {grid: [1, 1]}
+
+model:
+  rope:
+    time:  {share: 0.6, period: auto}
+    seq:   {share: 0.2, period: auto}

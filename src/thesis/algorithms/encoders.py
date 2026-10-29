@@ -7,7 +7,7 @@ for a per-layer cross source.
 
 Two spec keys compose encoders without new code:
 
-  frozen  no grads, permanent eval mode. Pretrained types (vjepa2, smolvlm)
+  frozen  no grads, permanent eval mode. Pretrained types (vjepa2, levjepa, smolvlm)
           default frozen; from-scratch types (vit) and heads default trainable.
   input   names another `encoders:` entry whose output this one consumes. The
           stream's raw batch field feeds the chain's root (the encoder with no
@@ -35,6 +35,7 @@ __all__ = [
     "Encoder",
     "ViTEncoder",
     "VJEPA2Encoder",
+    "LeVJEPAEncoder",
     "ResNetEncoder",
     "AttentivePoolEncoder",
     "LinearEncoder",
@@ -265,6 +266,42 @@ def _vjepa_vision_transformer():
     return vjepa_module("app.vjepa_2_1.models.vision_transformer")
 
 
+def _download_cached(url, filename=None):
+    """URL -> local path under `$TORCH_HOME/hub/checkpoints`, downloaded once."""
+    dest = Path(torch.hub.get_dir()) / "checkpoints" / (filename or url.rsplit("/", 1)[-1])
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # download_url_to_file writes a temp file and renames, so concurrent ranks
+        # at worst download twice, never read a torn file
+        torch.hub.download_url_to_file(url, str(dest), progress=True)
+    return str(dest)
+
+
+def _levjepa_module():
+    """The external/levjepa submodule's `module.py` (ViT factories, block-causal attention).
+
+    It imports only torch and numpy, so it is loaded straight from its file under a
+    private name rather than through sys.path, where a top-level `module` would shadow
+    nothing useful but collide with anything else called that.
+    """
+    import importlib.util
+
+    name = "_levjepa_module"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parents[3] / "external" / "levjepa" / "module.py"
+    if not path.is_file():
+        raise ImportError(
+            f"levjepa submodule not found at {path.parent}; "
+            f"run `git submodule update --init external/levjepa`"
+        )
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 class VJEPA2Encoder(Encoder):
     """Pretrained V-JEPA 2.1 video backbone over (B, T, C, H, W) uint8 frames.
 
@@ -359,13 +396,7 @@ class VJEPA2Encoder(Encoder):
                 )
             ref = self.PRETRAINED_URLS[arch]
         if ref.startswith(("http://", "https://")):
-            dest = Path(torch.hub.get_dir()) / "checkpoints" / ref.rsplit("/", 1)[-1]
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                # download_url_to_file writes a temp file and renames, so concurrent ranks
-                # at worst download twice, never read a torn file
-                torch.hub.download_url_to_file(ref, str(dest), progress=True)
-            ref = str(dest)
+            ref = _download_cached(ref)
         return ref
 
     def _load_checkpoint(self, path):
@@ -410,6 +441,146 @@ class VJEPA2Encoder(Encoder):
             return out.unflatten(0, (B, T)).flatten(1, 2)
         x = x.unflatten(0, (B, T)).permute(0, 2, 1, 3, 4)         # (B, C, T, H, W)
         return self.backbone(x.to(dtype))
+
+
+class LeVJEPAEncoder(Encoder):
+    """Pretrained LeVJEPA video backbone over (B, T, C, H, W) uint8 frames.
+
+    A ViT with per-frame tokens (tubelet 1), 3D RoPE and block-causal attention: patch
+    tokens see their own frame and earlier ones, and the [cls] token reads everything
+    but is read by nothing. Frames are resized to `crop_size`, ImageNet-normalized, and
+    each raw frame is repeated `repeat` times along time before encoding. `pooling`
+    picks what an index step becomes:
+
+      cls   -> (B, T, dim), the final-LayerNorm'd [cls] token: the only output the
+               LeVJEPA objective trains. Requires `per_frame: true`, since one clip has
+               one [cls]. The consuming stream's `grid` is [1, 1].
+      grid  -> (B, T * H/16 * W/16, dim) patch tokens, each step read off the last of
+               its `repeat` temporal slots (where it has attended to all of its copies).
+
+    `per_frame: true` encodes every index step as its own clip in the batch dimension,
+    so attention never crosses steps; `per_frame: false` (grid only) encodes the whole
+    window as one clip, so step t's tokens are a function of steps <= t.
+
+    `per_frame: true, repeat: 16, crop_size: 224` reproduces the published still-image
+    protocol (feature_visualization.ipynb, the ImageNet probe): its `pooler_output` for
+    `cls` and its last-slot patch tokens for `grid`. `repeat: 1` gives the single-frame
+    representation, which under block-causal attention is markedly weaker.
+
+    Spec: `arch` (vit_tiny 192 / vit_small 384 / vit_base 768 / vit_large 1024 /
+    vit_huge 1280 / vit_giant 1408), `checkpoint` (local .safetensors/.ckpt/.pt path,
+    URL, or `pretrained`, which resolves to the published VideoMix ViT-L; null keeps
+    random weights, for smoke tests only), `crop_size` (int or [H, W], default 224),
+    `pooling` (default cls), `per_frame` (default true), `repeat` (default 16),
+    `attn_mode` (block_causal / full, default block_causal: the released weights were
+    trained causal), `backbone` (extra factory kwargs), `frozen` (default true).
+    Checkpoints may be the Hugging Face export (`encoder.*` keys) or a LeVJEPA training
+    checkpoint, whose `state_dict_ema` is preferred over `state_dict`.
+    """
+
+    default_frozen = True
+    supports_encoding_cache = True
+
+    PRETRAINED = {
+        "vit_large": (
+            "https://huggingface.co/galilai-group/LeVJEPA-VideoMix-Large/resolve/"
+            "e831a0347737fcaa660b39c57d41c109de399845/model.safetensors",
+            "levjepa_videomix_large_e831a03.safetensors",
+        ),
+    }
+
+    def __init__(self, spec):
+        super().__init__(spec)
+        crop = spec.get("crop_size", 224)
+        self.crop_size = ((int(crop), int(crop)) if isinstance(crop, (int, float))
+                          else tuple(int(v) for v in crop))
+        self.pooling = spec.get("pooling", "cls")
+        assert self.pooling in ("cls", "grid"), f"unknown pooling '{self.pooling}'"
+        self.per_frame = bool(spec.get("per_frame", True))
+        self.repeat = int(spec.get("repeat", 16))
+        assert self.repeat >= 1, "repeat must be >= 1"
+        if self.pooling == "cls" and not self.per_frame:
+            raise ValueError(
+                "levjepa cls pooling yields one [cls] per clip, not per step; "
+                "set per_frame: true, or pooling: grid to encode the window as one clip"
+            )
+
+        vt = _levjepa_module()
+        arch = spec.get("arch", "vit_large")
+        if not arch.startswith("vit_") or not hasattr(vt, arch):
+            available = sorted(n for n in dir(vt) if n.startswith("vit_"))
+            raise ValueError(f"unknown levjepa arch '{arch}'. available: {available}")
+        kwargs = {
+            "img_size": self.crop_size[0],
+            "num_frames": 16,
+            "tubelet_size": 1,
+            "use_rope": True,
+            "attn_mode": spec.get("attn_mode", "block_causal"),
+            **(spec.get("backbone") or {}),
+        }
+        self.backbone = getattr(vt, arch)(**kwargs)
+        if spec.get("checkpoint"):
+            self._load_checkpoint(self._resolve_checkpoint(spec["checkpoint"], arch))
+
+        self.register_buffer("mean", torch.tensor(_IMAGENET_MEAN).view(3, 1, 1))
+        self.register_buffer("std", torch.tensor(_IMAGENET_STD).view(3, 1, 1))
+
+    def _resolve_checkpoint(self, ref, arch):
+        ref = str(ref)
+        if ref == "pretrained":
+            if arch not in self.PRETRAINED:
+                raise ValueError(
+                    f"no published LeVJEPA weights for '{arch}'; "
+                    f"available: {sorted(self.PRETRAINED)}"
+                )
+            return _download_cached(*self.PRETRAINED[arch])
+        if ref.startswith(("http://", "https://")):
+            return _download_cached(ref)
+        return ref
+
+    def _load_checkpoint(self, path):
+        if str(path).endswith(".safetensors"):
+            from safetensors.torch import load_file
+
+            state = load_file(path)
+        else:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            state = next((ckpt[k] for k in ("state_dict_ema", "state_dict")
+                          if isinstance(ckpt, dict) and k in ckpt), ckpt)
+        state = {k.removeprefix("module."): v for k, v in state.items()}
+        if any(k.startswith("encoder.") for k in state):
+            state = {k.removeprefix("encoder."): v for k, v in state.items()
+                     if k.startswith("encoder.")}
+        if self.backbone.pos_embed is None:
+            state.pop("pos_embed", None)
+        self.backbone.load_state_dict(state, strict=True)
+
+    def forward(self, frames):
+        if frames.ndim == 4:
+            frames = frames.unsqueeze(1)
+        B, T = frames.shape[:2]
+        R = self.repeat
+
+        x = frames.float()
+        if frames.dtype == torch.uint8:
+            x = x / 255.0
+        x = x.flatten(0, 1)                                       # (B*T, C, H, W)
+        if x.shape[-2:] != self.crop_size:
+            x = F.interpolate(x, size=self.crop_size, mode="bilinear", antialias=True)
+        x = (x - self.mean) / self.std
+        dtype = next(self.backbone.parameters()).dtype
+        if self.per_frame:
+            x = x.unsqueeze(2).expand(-1, -1, R, -1, -1)          # (B*T, C, R, H, W)
+        else:
+            x = x.unflatten(0, (B, T)).repeat_interleave(R, dim=1).transpose(1, 2)
+        out = self.backbone(x.to(dtype))                          # (N, 1 + slots*P, D)
+
+        if self.pooling == "cls":
+            return out[:, 0].unflatten(0, (B, T))
+        ps = self.backbone.patch_size
+        per_slot = (self.crop_size[0] // ps) * (self.crop_size[1] // ps)
+        patches = out[:, 1:].unflatten(1, (-1, per_slot))[:, R - 1::R]
+        return patches.reshape(B, -1, patches.shape[-1])
 
 
 class ResNetEncoder(Encoder):
@@ -590,9 +761,12 @@ class MLPEncoder(Encoder):
     raw low-dimensional field (e.g. the stacked action block conditioning the
     trunk via AdaLN) or, chained with `input:`, adapts another encoder's output.
 
+    `activation: gelu` swaps the gated hidden layer for Linear -> norm -> GELU, which with
+    `norm: batch` is the LeJEPA/LeVJEPA projector (`Projector` in external/levjepa).
+
     Spec: `in_dim`, `out_dim`, `hidden_dim` (default 4 * out_dim), `norm`
-    ("batch", "layer", or null -- default null). BatchNorm sees the flattened
-    leading dims as the batch.
+    ("batch", "layer", or null -- default null), `activation` ("swiglu" or "gelu" --
+    default swiglu). BatchNorm sees the flattened leading dims as the batch.
     """
 
     def __init__(self, spec):
@@ -602,10 +776,15 @@ class MLPEncoder(Encoder):
         norm = spec.get("norm")
         norms = {"batch": nn.BatchNorm1d, "layer": nn.LayerNorm}
         assert norm is None or norm in norms, f"unknown MLPEncoder norm '{norm}'"
-        self.mlp = nn.Sequential(
-            SwiGLULinear(in_dim, hidden, norm=norms[norm](hidden) if norm else None),
-            nn.Linear(hidden, out_dim),
-        )
+        activation = spec.get("activation", "swiglu")
+        norm_layer = norms[norm](hidden) if norm else None
+        if activation == "swiglu":
+            first = [SwiGLULinear(in_dim, hidden, norm=norm_layer)]
+        elif activation == "gelu":
+            first = [nn.Linear(in_dim, hidden), norm_layer or nn.Identity(), nn.GELU()]
+        else:
+            raise ValueError(f"unknown MLPEncoder activation '{activation}'")
+        self.mlp = nn.Sequential(*first, nn.Linear(hidden, out_dim))
 
     def forward(self, x):
         x = x.float()
@@ -766,6 +945,7 @@ class SmolVLMEncoder(Encoder):
 _ENCODER_TYPES = {
     "vit": ViTEncoder,
     "vjepa2": VJEPA2Encoder,
+    "levjepa": LeVJEPAEncoder,
     "resnet": ResNetEncoder,
     "attentive_pool": AttentivePoolEncoder,
     "linear": LinearEncoder,

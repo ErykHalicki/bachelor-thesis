@@ -172,6 +172,114 @@ def test_vjepa_checkpoint_roundtrip(tmp_path):
         assert ka == kb and torch.equal(va, vb)
 
 
+def make_levjepa(**overrides):
+    spec = {"type": "levjepa", "arch": "vit_tiny", "crop_size": 32, "repeat": 2, **overrides}
+    try:
+        return build_encoder(spec)
+    except ImportError as err:
+        pytest.skip(str(err))
+
+
+def test_levjepa_rejects_unknown_arch():
+    make_levjepa()
+    with pytest.raises(ValueError, match="unknown levjepa arch"):
+        build_encoder({"type": "levjepa", "arch": "vit_bogus", "crop_size": 32})
+
+
+def test_levjepa_cls_one_vector_per_frame():
+    enc = make_levjepa()
+    assert enc.frozen and enc.raw_steps_per_index == 1
+    frames = (torch.rand(2, 3, 3, 48, 64) * 255).to(torch.uint8)
+    assert enc(frames).shape == (2, 3, 192)
+
+
+def test_levjepa_cls_needs_per_frame():
+    make_levjepa()
+    with pytest.raises(ValueError, match="per_frame"):
+        build_encoder({"type": "levjepa", "arch": "vit_tiny", "crop_size": 32,
+                       "per_frame": False})
+
+
+def test_levjepa_grid_per_frame_and_clip_shapes():
+    frames = (torch.rand(2, 3, 3, 32, 48) * 255).to(torch.uint8)
+    for per_frame in (True, False):
+        enc = make_levjepa(pooling="grid", per_frame=per_frame, crop_size=[32, 48])
+        assert enc(frames).shape == (2, 3 * 2 * 3, 192)
+
+
+def test_levjepa_accepts_single_image():
+    enc = make_levjepa()
+    assert enc((torch.rand(2, 3, 32, 32) * 255).to(torch.uint8)).shape == (2, 1, 192)
+
+
+def test_levjepa_per_frame_matches_encoding_each_frame_alone():
+    enc = make_levjepa()
+    frames = (torch.rand(2, 3, 3, 32, 32) * 255).to(torch.uint8)
+    with torch.no_grad():
+        out = enc(frames)
+        alone = torch.cat([enc(frames[:, t:t + 1]) for t in range(3)], dim=1)
+    assert torch.allclose(out, alone, atol=1e-5)
+
+
+def test_levjepa_clip_grid_is_causal_across_steps():
+    """Under block-causal attention a step's tokens must not see later steps."""
+    enc = make_levjepa(pooling="grid", per_frame=False)
+    frames = (torch.rand(1, 3, 3, 32, 32) * 255).to(torch.uint8)
+    with torch.no_grad():
+        base = enc(frames)
+        frames[:, 2] = (torch.rand(1, 3, 32, 32) * 255).to(torch.uint8)
+        after = enc(frames)
+    assert torch.allclose(base[:, :8], after[:, :8], atol=1e-5)
+    assert not torch.allclose(base[:, 8:], after[:, 8:])
+
+
+def test_levjepa_pretrained_alias_needs_published_weights():
+    enc = make_levjepa()
+    with pytest.raises(ValueError, match="vit_large"):
+        enc._resolve_checkpoint("pretrained", "vit_tiny")
+    assert enc._resolve_checkpoint("/some/local.pt", "vit_tiny") == "/some/local.pt"
+
+
+def test_levjepa_checkpoint_roundtrip_hf_and_training_formats(tmp_path):
+    from safetensors.torch import save_file
+
+    src = make_levjepa()
+    encoder_state = {f"encoder.{k}": v.contiguous() for k, v in src.backbone.state_dict().items()}
+    save_file(encoder_state, str(tmp_path / "hf.safetensors"))
+    projector = {"projector.0.weight": torch.zeros(1)}
+    torch.save({"state_dict": projector, "state_dict_ema": {**encoder_state, **projector}},
+               tmp_path / "train.ckpt")
+    for name in ("hf.safetensors", "train.ckpt"):
+        dst = make_levjepa(checkpoint=str(tmp_path / name))
+        for (ka, va), (kb, vb) in zip(
+            src.backbone.state_dict().items(), dst.backbone.state_dict().items(), strict=True
+        ):
+            assert ka == kb and torch.equal(va, vb)
+
+
+def test_mlp_gelu_is_the_levjepa_projector():
+    try:
+        from thesis.algorithms.encoders import _levjepa_module
+
+        Projector = _levjepa_module().Projector
+    except ImportError as err:
+        pytest.skip(str(err))
+    ref = Projector(input_dim=32, hidden_dim=64, output_dim=16)
+    enc = build_encoder({"type": "mlp", "in_dim": 32, "hidden_dim": 64, "out_dim": 16,
+                         "norm": "batch", "activation": "gelu"})
+    enc.mlp.load_state_dict(ref.net.state_dict(), strict=True)
+    x = torch.randn(8, 3, 32)
+    for mode in (True, False):
+        ref.train(mode)
+        enc.train(mode)
+        assert torch.allclose(enc(x), ref(x), atol=1e-6)
+
+
+def test_mlp_rejects_unknown_activation():
+    with pytest.raises(ValueError, match="activation"):
+        build_encoder({"type": "mlp", "in_dim": 4, "out_dim": 4, "activation": "relu6"})
+
+
 def chain_cfg():
     """Frozen vjepa2.1 -> trainable linear head -> sigreg on the head's output."""
     return OmegaConf.create({

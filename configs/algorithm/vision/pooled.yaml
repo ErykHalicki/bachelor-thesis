@@ -3,6 +3,8 @@
 # Selecting this group REQUIRES `cache_encodings: null` in the run config: the cache
 # stores a frozen root encoder's output, and this backbone moves.
 
+vision_dim: 512   # width of proj_scene / proj_wrist, read by every stream they feed
+
 encoders:
   # The backbone belongs to this group, not flow_common: an arm swapping it must be able to
   # not declare it, and a config cannot delete an inherited key.

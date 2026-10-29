@@ -189,6 +189,6 @@ def test_pixel_decoder_runs_freeze_what_they_measure(cfg):
     for name, encoder in algo.encoders.items():
         if encoder in decoders:
             continue
-        assert encoder.get("frozen", encoder.get("type") in ("vjepa2", "smolvlm")), (
+        assert encoder.get("frozen", encoder.get("type") in ("vjepa2", "levjepa", "smolvlm")), (
             f"encoder '{name}' of {algo._name} is trainable in a probe run"
         )

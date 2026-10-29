@@ -47,7 +47,7 @@ conditioning:
   scene_context:
     from: ${algorithm.scene_field}
     encoder: proj_scene
-    dim: 512
+    dim: ${algorithm.vision_dim}
     index: "-1..0"
     raw_index: ${algorithm.context_raw_index}
     fps: ${algorithm.video_fps}
@@ -55,7 +55,7 @@ conditioning:
   wrist_context:
     from: ${algorithm.wrist_field}
     encoder: proj_wrist
-    dim: 512
+    dim: ${algorithm.vision_dim}
     index: "-1..0"
     raw_index: ${algorithm.context_raw_index}
     fps: ${algorithm.video_fps}
