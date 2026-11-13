@@ -1,0 +1,19 @@
+# OCBench's published visual-block-single-task1-v0 demos (successful episodes) as a LeRobot
+# dataset at the env's 50 Hz, converted by scripts/local/convert_ocbench.sbatch. Cameras hold
+# the last stored frame between OCBench's 25-step renders, the way the ocbench eval feeds
+# them, so models that want fresh frames anchor every 25 rows (`subsample_streams`).
+defaults:
+  - lerobot_base
+  - _self_
+
+repo_id: local/ocbench_block_single_visual
+root: ${oc.env:HOME}/data/lerobot/ocbench_block_single_visual
+validation_split: 0.01
+
+normalize:
+  keys: [action]
+  method: mean_std
+
+# read by the ocbench eval, which rolls the trained model out in this env
+env_name: block-single-task1-v0
+cameras: [front, side, wrist]

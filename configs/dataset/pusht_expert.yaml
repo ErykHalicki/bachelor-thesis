@@ -1,0 +1,16 @@
+# The Push-T expert demonstrations LeWM and H-JEPA train on (quentinll/lewm-pusht), converted
+# by scripts/convert_pusht_to_lerobot.py with the camera as inline lossless PNG at 224 px,
+# 10 Hz. Their val file (pusht_expert_val.h5) is not in it: it is the source of the
+# reference's 50 planning tasks, so the held-out split here is drawn from the train file.
+defaults:
+  - lerobot_base
+  - _self_
+
+repo_id: local/pusht_expert
+root: /mnt/hdd/lerobot/pusht_expert
+validation_split: 0.01
+image_size: [224, 224]
+
+normalize:
+  keys: [action]
+  method: mean_std
