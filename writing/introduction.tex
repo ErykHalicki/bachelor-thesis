@@ -6,12 +6,12 @@ Problem: Most robot learning models are frozen at deployment, and cannot improve
 
 %Potential Solutions: 
 %- Fine tune a WAM or WM on its own rollout data and seeing if this improves world modelling and policy performance
-%    - how does the world modelling objective influence the policy objective? is there positive transfer? shown in wams\cite{yuan2026fast} but not wm's + policy setups
+%    - how does the world modelling objective influence the policy objective? is there positive transfer? shown in wams\cite{yuan2026fastwam} but not wm's + policy setups
 %    - WM + policy is not really a proven recipe yet
 %        - Not true! UVA and UWM, Motus, etc. all show that this works 
 
 %- Add in context learning using some kind of memory system or increasing context length
-%    - eg. using memory layers like \cite{jiang2026robotttcontextscaling}
+%    - eg. using memory layers like \cite{jiang2026robottt}
 %    - Just scale context length (e.g. use mamba arch, RNN, or just scale compute)
 %    - add RAG style memories
 

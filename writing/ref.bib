@@ -1,194 +1,252 @@
-% Deliberately small: only work that the implementation directly instantiates and that
-% differs from the main architecture described in minghao_reference.tex. Keys for entries
-% that already appear in the main paper's bibliography (maes2026lewm, ye2026dreamzero,
-% zhu2025uwm, rubinstein1999cem) are matched so the two files merge without collisions.
-
-@article{vjepa2_1,
-  title={V-JEPA 2.1: Unlocking Dense Features in Video Self-Supervised Learning},
-  author={Mur-Labadia, Lorenzo and Muckley, Matthew and Bar, Amir and Assran, Mahmoud and
-Sinha, Koustuv and Rabbat, Michael and LeCun, Yann and Ballas, Nicolas and Bardes, Adrien},
-  journal={arXiv preprint arXiv:2603.14482},
-  year={2026}
+@article{mur-labadia2026vjepa,
+  title = {V-{{JEPA}} 2.1: {{Unlocking}} Dense Features in Video Self-Supervised Learning},
+  author = {{Mur-Labadia}, Lorenzo and Muckley, Matthew and Bar, Amir and Assran, Mahmoud and Sinha, Koustuv and Rabbat, Michael and LeCun, Yann and Ballas, Nicolas and Bardes, Adrien},
+  year = 2026,
+  journal = {arXiv preprint arXiv:2603.14482},
+  eprint = {2603.14482},
+  abstract = {We present V-JEPA 2.1, a family of self-supervised models that learn dense, high-quality visual representations for both images and videos while retaining strong global scene understanding. The approach combines four key components. First, a dense predictive loss uses a masking-based objective in which both visible and masked tokens contribute to the training signal, encouraging explicit spatial and temporal grounding. Second, deep self-supervision applies the self-supervised objective hierarchically across multiple intermediate encoder layers to improve representation quality. Third, multi-modal tokenizers enable unified training across images and videos. Finally, the model benefits from effective scaling in both model capacity and training data. Together, these design choices produce representations that are spatially structured, semantically coherent, and temporally consistent. Empirically, V-JEPA 2.1 achieves state-of-the-art performance on several challenging benchmarks, including 7.71 mAP on Ego4D for short-term object-interaction anticipation and 40.8 Recall@5 on EPIC-KITCHENS for high-level action anticipation, as well as a 20-point improvement in real-robot grasping success rate over V-JEPA-2 AC. The model also demonstrates strong performance in robotic navigation (5.687 ATE on TartanDrive), depth estimation (0.307 RMSE on NYUv2 with a linear probe), and global recognition (77.7 on Something-Something-V2). These results show that V-JEPA 2.1 significantly advances the state of the art in dense visual understanding and world modeling.},
+  archiveprefix = {arXiv}
 }
 
-@misc{maes2026lewm,
-      title={LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels},
-      author={Lucas Maes and Quentin Le Lidec and Damien Scieur and Yann LeCun and Randall Balestriero},
-      year={2026},
-      eprint={2603.19312},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2603.19312},
+@misc{maes2026leworldmodel,
+  title = {{{LeWorldModel}}: {{Stable}} End-to-End Joint-Embedding Predictive Architecture from Pixels},
+  author = {Maes, Lucas and Lidec, Quentin Le and Scieur, Damien and LeCun, Yann and Balestriero, Randall},
+  year = 2026,
+  number = {arXiv:2603.19312},
+  eprint = {2603.19312},
+  primaryclass = {cs.LG},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2603.19312},
+  url = {https://arxiv.org/abs/2603.19312},
+  abstract = {Joint Embedding Predictive Architectures (JEPAs) offer a compelling framework for learning world models in compact latent spaces, yet existing methods remain fragile, relying on complex multi-term losses, exponential moving averages, pre-trained encoders, or auxiliary supervision to avoid representation collapse. In this work, we introduce LeWorldModel (LeWM), the first JEPA that trains stably end-to-end from raw pixels using only two loss terms: a next-embedding prediction loss and a regularizer enforcing Gaussian-distributed latent embeddings. This reduces tunable loss hyperparameters from six to one compared to the only existing end-to-end alternative. With \textasciitilde 15M parameters trainable on a single GPU in a few hours, LeWM plans up to 48x faster than foundation-model-based world models while remaining competitive across diverse 2D and 3D control tasks. Beyond control, we show that LeWM's latent space encodes meaningful physical structure through probing of physical quantities. Surprise evaluation confirms that the model reliably detects physically implausible events.},
+  archiveprefix = {arXiv}
 }
 
-@misc{ye2026dreamzero,
-      title={World Action Models are Zero-shot Policies},
-      author={Seonghyeon Ye and Yunhao Ge and Kaiyuan Zheng and Shenyuan Gao and Sihyun Yu and Joel Jang and others},
-      year={2026},
-      eprint={2602.15922},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2602.15922},
-}
-
-@article{zhu2025uwm,
-  title={Unified world models: Coupling video and action diffusion for pretraining on large robotic datasets},
-  author={Zhu, Chuning and Yu, Raymond and Feng, Siyuan and Burchfiel, Benjamin and Shah, Paarth and Gupta, Abhishek},
-  journal={arXiv preprint arXiv:2504.02792},
-  year={2025}
-}
-
-@misc{peebles2023dit,
-      title={Scalable Diffusion Models with Transformers},
-      author={William Peebles and Saining Xie},
-      year={2023},
-      eprint={2212.09748},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2212.09748},
-}
-
-@misc{lipman2023flowmatching,
-      title={Flow Matching for Generative Modeling},
-      author={Yaron Lipman and Ricky T. Q. Chen and Heli Ben-Hamu and Maximilian Nickel and Matt Le},
-      year={2023},
-      eprint={2210.02747},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2210.02747},
-}
-
-@misc{ma2024rope3d,
-      title={3D-RPE: Enhancing Long-Context Modeling Through 3D Rotary Position Encoding},
-      author={Xindian Ma and Wenyuan Liu and Peng Zhang and Nan Xu},
-      year={2024},
-      eprint={2406.09897},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2406.09897},
-}
-
-@misc{cadene2026lerobot,
-      title={LeRobot: An Open-Source Library for End-to-End Robot Learning},
-      author={Remi Cadene and Simon Aliberts and Francesco Capuano and Michel Aractingi and Adil Zouitine and Pepijn Kooijmans and Quentin Gallou\'edec and Thomas Wolf and others},
-      year={2026},
-      eprint={2602.22818},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2602.22818},
-}
-
-@article{rubinstein1999cem,
-  title={The cross-entropy method for combinatorial and continuous optimization},
-  author={Rubinstein, Reuven Y.},
-  journal={Methodology and Computing in Applied Probability},
-  volume={1},
-  number={2},
-  pages={127--190},
-  year={1999}
-}
-
-@misc{black2024pi0,
-      title={$\pi_0$: A Vision-Language-Action Flow Model for General Robot Control},
-      author={Kevin Black and Noah Brown and Danny Driess and Adnan Esmail and Michael Equi
-and Chelsea Finn and Niccolo Fusai and Lachy Groom and Karol Hausman and Brian Ichter
-and Szymon Jakubczak and Tim Jones and Liyiming Ke and Sergey Levine and Adrian Li-Bell
-and Mohith Mothukuri and Suraj Nair and Karl Pertsch and Lucy Xiaoyang Shi and James Tanner
-and Quan Vuong and Anna Walling and Haohuan Wang and Ury Zhilinsky},
-      year={2024},
-      eprint={2410.24164},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2410.24164},
-}
-
-@article{wang2026adajepa,
-  title={AdaJEPA: An Adaptive Latent World Model},
-  author={Wang, Ying and Bounou, Oumayma and LeCun, Yann and Ren, Mengye},
-  journal={arXiv preprint arXiv:2606.32026},
-  year={2026}
-}
-
-@article{elsayed2023utility,
-  title={Utility-based perturbed gradient descent: An optimizer for continual learning},
-  author={Elsayed, Mohamed and Mahmood, A Rupam},
-  journal={arXiv preprint arXiv:2302.03281},
-  year={2023}
-}
-
-@misc{jiang2026robotttcontextscaling,
-      title={RoboTTT: Context Scaling for Robot Policies},
-      author={Jiang, Yunfan and Chebotar, Yevgen and Zheng, Ruijie and Hu, Fengyuan and Ge, Yunhao and Wu, Jimmy and Dai, Tianyuan and Reed, Scott and Fei-Fei, Li and Zhu, Yuke and Fan, Linxi ``Jim''},
-      year={2026},
-      eprint={2607.15275},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2607.15275},
-}
-
-@misc{su2021roformer,
-      title={RoFormer: Enhanced Transformer with Rotary Position Embedding},
-      author={Jianlin Su and Yu Lu and Shengfeng Pan and Bo Wen and Yunfeng Liu},
-      year={2021},
-      eprint={2104.09864},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2104.09864},
-}
-
-@article{capuano2025robot,
-  title={Robot learning: A tutorial},
-  author={Capuano, Francesco and Pascal, Caroline and Zouitine, Adil and Wolf, Thomas and Aractingi, Michel},
-  journal={arXiv preprint arXiv:2510.12403},
-  year={2025}
-}
-
-@article{chi2025diffusion,
-  title={Diffusion policy: Visuomotor policy learning via action diffusion},
-  author={Chi, Cheng and Xu, Zhenjia and Feng, Siyuan and Cousineau, Eric and Du, Yilun and Burchfiel, Benjamin and Tedrake, Russ and Song, Shuran},
-  journal={The International Journal of Robotics Research},
-  volume={44},
-  number={10-11},
-  pages={1684--1704},
-  year={2025},
-  publisher={Sage Publications Sage UK: London, England}
-}
-
-@article{tang2025deep,
-  title={Deep reinforcement learning for robotics: A survey of real-world successes},
-  author={Tang, Chen and Abbatematteo, Ben and Hu, Jiaheng and Chandra, Rohan and Mart{\'\i}n-Mart{\'\i}n, Roberto and Stone, Peter},
-  journal={Annual Review of Control, Robotics, and Autonomous Systems},
-  volume={8},
-  number={1},
-  pages={153--188},
-  year={2025},
-  publisher={Annual Reviews}
-}
-
-@phdthesis{powers2023continual,
-  title={Continual Robot Learning: Benchmarks and Modular Methods},
-  author={Powers, Samantha},
-  year={2023},
-  school={Carnegie Mellon University}
-}
-
-@article{yuan2026fast,
-  title={Fast-wam: Do world action models need test-time future imagination?},
-  author={Yuan, Tianyuan and Dong, Zibin and Liu, Yicheng and Zhao, Hang},
-  journal={arXiv preprint arXiv:2603.16666},
-  year={2026}
-}
-
-@article{chen2026robot,
-  title={Robot Self-Improvement via Human-Video Dynamics Models},
-  author={Chen, Hanzhi and Zhang, Anran and Schaefer, Simon and Chen, Kejia and Chen, Shi and Cremers, Daniel and Mees, Oier and Leutenegger, Stefan},
-  journal={arXiv preprint arXiv:2606.21406},
-  year={2026}
+@misc{ye2026world,
+  title = {World Action Models Are Zero-Shot Policies},
+  author = {Ye, Seonghyeon and Ge, Yunhao and Zheng, Kaiyuan and Gao, Shenyuan and Yu, Sihyun and Jang, Joel and others},
+  year = 2026,
+  number = {arXiv:2602.15922},
+  eprint = {2602.15922},
+  primaryclass = {cs.RO},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2602.15922},
+  url = {https://arxiv.org/abs/2602.15922},
+  abstract = {State-of-the-art Vision-Language-Action (VLA) models excel at semantic generalization but struggle to generalize to unseen physical motions in novel environments. We introduce DreamZero, a World Action Model (WAM) built upon a pretrained video diffusion backbone. Unlike VLAs, WAMs learn physical dynamics by predicting future world states and actions, using video as a dense representation of how the world evolves. By jointly modeling video and action, DreamZero learns diverse skills effectively from heterogeneous robot data without relying on repetitive demonstrations. This results in over 2x improvement in generalization to new tasks and environments compared to state-of-the-art VLAs in real robot experiments. Crucially, through model and system optimizations, we enable a 14B autoregressive video diffusion model to perform real-time closed-loop control at 7Hz. Finally, we demonstrate two forms of cross-embodiment transfer: video-only demonstrations from other robots or humans yield a relative improvement of over 42\% on unseen task performance with just 10-20 minutes of data. More surprisingly, DreamZero enables few-shot embodiment adaptation, transferring to a new embodiment with only 30 minutes of play data while retaining zero-shot generalization.},
+  archiveprefix = {arXiv}
 }
 
 @article{zhu2025unified,
-  title={Unified world models: Coupling video and action diffusion for pretraining on large robotic datasets},
-  author={Zhu, Chuning and Yu, Raymond and Feng, Siyuan and Burchfiel, Benjamin and Shah, Paarth and Gupta, Abhishek},
-  journal={arXiv preprint arXiv:2504.02792},
-  year={2025}
+  title = {Unified World Models: {{Coupling}} Video and Action Diffusion for Pretraining on Large Robotic Datasets},
+  author = {Zhu, Chuning and Yu, Raymond and Feng, Siyuan and Burchfiel, Benjamin and Shah, Paarth and Gupta, Abhishek},
+  year = 2025,
+  journal = {arXiv preprint arXiv:2504.02792},
+  eprint = {2504.02792},
+  abstract = {Imitation learning has emerged as a promising approach towards building generalist robots. However, scaling imitation learning for large robot foundation models remains challenging due to its reliance on high-quality expert demonstrations. Meanwhile, large amounts of video data depicting a wide range of environments and diverse behaviors are readily available. This data provides a rich source of information about real-world dynamics and agent-environment interactions. Leveraging this data directly for imitation learning, however, has proven difficult due to the lack of action annotation. In this work, we present Unified World Models (UWM), a framework that allows for leveraging both video and action data for policy learning. Specifically, a UWM integrates an action diffusion process and a video diffusion process within a unified transformer architecture, where independent diffusion timesteps govern each modality. By controlling each diffusion timestep, UWM can flexibly represent a policy, a forward dynamics, an inverse dynamics, and a video generator. Through simulated and real-world experiments, we show that: (1) UWM enables effective pretraining on large-scale multitask robot datasets with both dynamics and action predictions, resulting in more generalizable and robust policies than imitation learning, (2) UWM naturally facilitates learning from action-free video data through independent control of modality-specific diffusion timesteps, further improving the performance of finetuned policies. Our results suggest that UWM offers a promising step toward harnessing large, heterogeneous datasets for scalable robot learning, and provides a simple unification between the often disparate paradigms of imitation learning and world modeling. Videos and code are available at https://weirdlabuw.github.io/uwm/.},
+  archiveprefix = {arXiv}
+}
+
+@misc{peebles2023scalable,
+  title = {Scalable Diffusion Models with Transformers},
+  author = {Peebles, William and Xie, Saining},
+  year = 2023,
+  number = {arXiv:2212.09748},
+  eprint = {2212.09748},
+  primaryclass = {cs.CV},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2212.09748},
+  url = {https://arxiv.org/abs/2212.09748},
+  abstract = {We explore a new class of diffusion models based on the transformer architecture. We train latent diffusion models of images, replacing the commonly-used U-Net backbone with a transformer that operates on latent patches. We analyze the scalability of our Diffusion Transformers (DiTs) through the lens of forward pass complexity as measured by Gflops. We find that DiTs with higher Gflops -- through increased transformer depth/width or increased number of input tokens -- consistently have lower FID. In addition to possessing good scalability properties, our largest DiT-XL/2 models outperform all prior diffusion models on the class-conditional ImageNet 512x512 and 256x256 benchmarks, achieving a state-of-the-art FID of 2.27 on the latter.},
+  archiveprefix = {arXiv}
+}
+
+@misc{lipman2023flow,
+  title = {Flow Matching for Generative Modeling},
+  author = {Lipman, Yaron and Chen, Ricky T. Q. and {Ben-Hamu}, Heli and Nickel, Maximilian and Le, Matt},
+  year = 2023,
+  number = {arXiv:2210.02747},
+  eprint = {2210.02747},
+  primaryclass = {cs.LG},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2210.02747},
+  url = {https://arxiv.org/abs/2210.02747},
+  abstract = {We introduce a new paradigm for generative modeling built on Continuous Normalizing Flows (CNFs), allowing us to train CNFs at unprecedented scale. Specifically, we present the notion of Flow Matching (FM), a simulation-free approach for training CNFs based on regressing vector fields of fixed conditional probability paths. Flow Matching is compatible with a general family of Gaussian probability paths for transforming between noise and data samples -- which subsumes existing diffusion paths as specific instances. Interestingly, we find that employing FM with diffusion paths results in a more robust and stable alternative for training diffusion models. Furthermore, Flow Matching opens the door to training CNFs with other, non-diffusion probability paths. An instance of particular interest is using Optimal Transport (OT) displacement interpolation to define the conditional probability paths. These paths are more efficient than diffusion paths, provide faster training and sampling, and result in better generalization. Training CNFs using Flow Matching on ImageNet leads to consistently better performance than alternative diffusion-based methods in terms of both likelihood and sample quality, and allows fast and reliable sample generation using off-the-shelf numerical ODE solvers.},
+  archiveprefix = {arXiv}
+}
+
+@misc{ma20243drpe,
+  title = {{{3D-RPE}}: {{Enhancing}} Long-Context Modeling through {{3D}} Rotary Position Encoding},
+  author = {Ma, Xindian and Liu, Wenyuan and Zhang, Peng and Xu, Nan},
+  year = 2024,
+  number = {arXiv:2406.09897},
+  eprint = {2406.09897},
+  primaryclass = {cs.CL},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2406.09897},
+  url = {https://arxiv.org/abs/2406.09897},
+  abstract = {Inspired by the Bloch Sphere representation, we propose a novel rotary position encoding on a three-dimensional sphere, named 3D Rotary Position Encoding (3D-RPE). 3D-RPE is an advanced version of the widely used 2D Rotary Position Encoding (RoPE), with two major advantages for modeling long contexts: controllable long-term decay and improved position resolution. For controllable long-term decay, 3D-RPE allows for the regulation of long-term decay within the chunk size, ensuring the modeling of relative positional information between tokens at a distant relative position. For enhanced position resolution, 3D-RPE can mitigate the degradation of position resolution caused by position interpolation on RoPE. We have conducted experiments on long-context Natural Language Understanding (NLU) and long-sequence Language Modeling (LM) tasks. From the experimental results, 3D-RPE achieved performance improvements over RoPE, especially in long-context NLU tasks.},
+  archiveprefix = {arXiv}
+}
+
+@misc{cadene2026lerobot,
+  title = {{{LeRobot}}: {{An}} Open-Source Library for End-to-End Robot Learning},
+  author = {Cadene, Remi and Aliberts, Simon and Capuano, Francesco and Aractingi, Michel and Zouitine, Adil and Kooijmans, Pepijn and Gallou{\'e}dec, Quentin and Wolf, Thomas and others},
+  year = 2026,
+  number = {arXiv:2602.22818},
+  eprint = {2602.22818},
+  primaryclass = {cs.RO},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2602.22818},
+  url = {https://arxiv.org/abs/2602.22818},
+  abstract = {Robotics is undergoing a significant transformation powered by advances in high-level control techniques based on machine learning, giving rise to the field of robot learning. Recent progress in robot learning has been accelerated by the increasing availability of affordable teleoperation systems, large-scale openly available datasets, and scalable learning-based methods. However, development in the field of robot learning is often slowed by fragmented, closed-source tools designed to only address specific sub-components within the robotics stack. In this paper, we present lerobot, an open-source library that integrates across the entire robot learning stack, from low-level middleware communication for motor controls to large-scale dataset collection, storage and streaming. The library is designed with a strong focus on real-world robotics, supporting accessible hardware platforms while remaining extensible to new embodiments. It also supports efficient implementations for various state-of-the-art robot learning algorithms from multiple prominent paradigms, as well as a generalized asynchronous inference stack. Unlike traditional pipelines which heavily rely on hand-crafted techniques, lerobot emphasizes scalable learning approaches that improve directly with more data and compute. Designed for accessibility, scalability, and openness, lerobot lowers the barrier to entry for researchers and practitioners to robotics while providing a platform for reproducible, state-of-the-art robot learning.},
+  archiveprefix = {arXiv}
+}
+
+@article{rubinstein1999crossentropy,
+  title = {The Cross-Entropy Method for Combinatorial and Continuous Optimization},
+  author = {Rubinstein, Reuven Y.},
+  year = 1999,
+  journal = {Methodology and Computing in Applied Probability},
+  volume = {1},
+  number = {2},
+  pages = {127--190}
+}
+
+@misc{black2024p0,
+  title = {{{$\pi_{0}$}}: A Vision-Language-Action Flow Model for General Robot Control},
+  author = {Black, Kevin and Brown, Noah and Driess, Danny and Esmail, Adnan and Equi, Michael and Finn, Chelsea and Fusai, Niccolo and Groom, Lachy and Hausman, Karol and Ichter, Brian and Jakubczak, Szymon and Jones, Tim and Ke, Liyiming and Levine, Sergey and {Li-Bell}, Adrian and Mothukuri, Mohith and Nair, Suraj and Pertsch, Karl and Shi, Lucy Xiaoyang and Tanner, James and Vuong, Quan and Walling, Anna and Wang, Haohuan and Zhilinsky, Ury},
+  year = 2024,
+  number = {arXiv:2410.24164},
+  eprint = {2410.24164},
+  primaryclass = {cs.LG},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2410.24164},
+  url = {https://arxiv.org/abs/2410.24164},
+  abstract = {Robot learning holds tremendous promise to unlock the full potential of flexible, general, and dexterous robot systems, as well as to address some of the deepest questions in artificial intelligence. However, bringing robot learning to the level of generality required for effective real-world systems faces major obstacles in terms of data, generalization, and robustness. In this paper, we discuss how generalist robot policies (i.e., robot foundation models) can address these challenges, and how we can design effective generalist robot policies for complex and highly dexterous tasks. We propose a novel flow matching architecture built on top of a pre-trained vision-language model (VLM) to inherit Internet-scale semantic knowledge. We then discuss how this model can be trained on a large and diverse dataset from multiple dexterous robot platforms, including single-arm robots, dual-arm robots, and mobile manipulators. We evaluate our model in terms of its ability to perform tasks in zero shot after pre-training, follow language instructions from people and from a high-level VLM policy, and its ability to acquire new skills via fine-tuning. Our results cover a wide variety of tasks, such as laundry folding, table cleaning, and assembling boxes.},
+  archiveprefix = {arXiv}
+}
+
+@article{wang2026adajepa,
+  title = {{{AdaJEPA}}: {{An}} Adaptive Latent World Model},
+  author = {Wang, Ying and Bounou, Oumayma and LeCun, Yann and Ren, Mengye},
+  year = 2026,
+  journal = {arXiv preprint arXiv:2606.32026},
+  eprint = {2606.32026},
+  abstract = {Latent world models enable planning from high-dimensional observations by predicting future states in a compact latent space. However, these models are typically kept frozen at test time: when their predictions become inaccurate, planning can fail, especially under test-time distribution shift. To address this, we propose AdaJEPA, an adaptive latent world model that performs test-time adaptation within the closed loop of model predictive control (MPC). After training, AdaJEPA plans and executes the first action chunk, uses the observed next-state transition as a self-supervised adaptation signal, and replans with the updated model. This closed-loop update continuously recalibrates the world model without additional expert demonstrations. Across a range of goal-reaching tasks, AdaJEPA substantially improves planning success with as few as one gradient step per MPC replanning step.},
+  archiveprefix = {arXiv}
+}
+
+@article{elsayed2023utilitybased,
+  title = {Utility-Based Perturbed Gradient Descent: {{An}} Optimizer for Continual Learning},
+  author = {Elsayed, Mohamed and Mahmood, A Rupam},
+  year = 2023,
+  journal = {arXiv preprint arXiv:2302.03281},
+  eprint = {2302.03281},
+  abstract = {Modern representation learning methods often struggle to adapt quickly under non-stationarity because they suffer from catastrophic forgetting and decaying plasticity. Such problems prevent learners from fast adaptation since they may forget useful features or have difficulty learning new ones. Hence, these methods are rendered ineffective for continual learning. This paper proposes Utility-based Perturbed Gradient Descent (UPGD), an online learning algorithm well-suited for continual learning agents. UPGD protects useful weights or features from forgetting and perturbs less useful ones based on their utilities. Our empirical results show that UPGD helps reduce forgetting and maintain plasticity, enabling modern representation learning methods to work effectively in continual learning.},
+  archiveprefix = {arXiv}
+}
+
+@misc{jiang2026robottt,
+  title = {{{RoboTTT}}: {{Context}} Scaling for Robot Policies},
+  author = {Jiang, Yunfan and Chebotar, Yevgen and Zheng, Ruijie and Hu, Fengyuan and Ge, Yunhao and Wu, Jimmy and Dai, Tianyuan and Reed, Scott and {Fei-Fei}, Li and Zhu, Yuke and Fan, Linxi ``Jim''},
+  year = 2026,
+  number = {arXiv:2607.15275},
+  eprint = {2607.15275},
+  primaryclass = {cs.RO},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2607.15275},
+  url = {https://arxiv.org/abs/2607.15275},
+  abstract = {Recent robot foundation models operate with single-step or short-history visuomotor context. We introduce Test-Time-Training Robot Policies (RoboTTT), a robot model and training recipe that scale visuomotor context to 8K timesteps, three orders of magnitude beyond state-of-the-art policies, without growing inference latency. At this context length, we unlock new robot capabilities: one-shot in-context imitation from human video demonstrations, on-the-fly policy improvement, robustness to perturbations, and stronger performance on multi-stage, long-horizon tasks. We also observe, for the first time, steady gains in closed-loop performance as pretraining context length scales. At its core, RoboTTT integrates Test-Time Training into robot foundation models such as Vision-Language-Action policies, yielding a sequence model whose recurrent state consists of fast weights, parameters updated by gradient descent during both training and inference, compressing histories into weight space and retrieving contextual information for long-context conditioning. To scale training context length, the recipe combines sequence action forcing with truncated backpropagation through time. On challenging real-robot manipulation tasks, RoboTTT improves overall performance by 87\% over the single-step context baseline and fully completes a five-minute, ten-stage assembly task, which no baseline ever does. RoboTTT trained with 8K-timestep context outperforms the same model pretrained with 1K timesteps by 62\%, suggesting context length as a new scaling axis for robot foundation models. Videos are available at https://research.nvidia.com/labs/gear/robottt/},
+  archiveprefix = {arXiv}
+}
+
+@misc{su2021roformer,
+  title = {{{RoFormer}}: {{Enhanced}} Transformer with Rotary Position Embedding},
+  author = {Su, Jianlin and Lu, Yu and Pan, Shengfeng and Wen, Bo and Liu, Yunfeng},
+  year = 2021,
+  number = {arXiv:2104.09864},
+  eprint = {2104.09864},
+  primaryclass = {cs.CL},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2104.09864},
+  url = {https://arxiv.org/abs/2104.09864},
+  abstract = {Position encoding recently has shown effective in the transformer architecture. It enables valuable supervision for dependency modeling between elements at different positions of the sequence. In this paper, we first investigate various methods to integrate positional information into the learning process of transformer-based language models. Then, we propose a novel method named Rotary Position Embedding(RoPE) to effectively leverage the positional information. Specifically, the proposed RoPE encodes the absolute position with a rotation matrix and meanwhile incorporates the explicit relative position dependency in self-attention formulation. Notably, RoPE enables valuable properties, including the flexibility of sequence length, decaying inter-token dependency with increasing relative distances, and the capability of equipping the linear self-attention with relative position encoding. Finally, we evaluate the enhanced transformer with rotary position embedding, also called RoFormer, on various long text classification benchmark datasets. Our experiments show that it consistently overcomes its alternatives. Furthermore, we provide a theoretical analysis to explain some experimental results. RoFormer is already integrated into Huggingface: https://huggingface.co/docs/transformers/model\_doc/roformer.},
+  archiveprefix = {arXiv}
+}
+
+@article{capuano2025robot,
+  title = {Robot Learning: {{A}} Tutorial},
+  author = {Capuano, Francesco and Pascal, Caroline and Zouitine, Adil and Wolf, Thomas and Aractingi, Michel},
+  year = 2025,
+  journal = {arXiv preprint arXiv:2510.12403},
+  eprint = {2510.12403},
+  abstract = {Robot learning is at an inflection point, driven by rapid advancements in machine learning and the growing availability of large-scale robotics data. This shift from classical, model-based methods to data-driven, learning-based paradigms is unlocking unprecedented capabilities in autonomous systems. This tutorial navigates the landscape of modern robot learning, charting a course from the foundational principles of Reinforcement Learning and Behavioral Cloning to generalist, language-conditioned models capable of operating across diverse tasks and even robot embodiments. This work is intended as a guide for researchers and practitioners, and our goal is to equip the reader with the conceptual understanding and practical tools necessary to contribute to developments in robot learning, with ready-to-use examples implemented in lerobot.},
+  archiveprefix = {arXiv}
+}
+
+@article{chi2025diffusion,
+  title = {Diffusion Policy: {{Visuomotor}} Policy Learning via Action Diffusion},
+  author = {Chi, Cheng and Xu, Zhenjia and Feng, Siyuan and Cousineau, Eric and Du, Yilun and Burchfiel, Benjamin and Tedrake, Russ and Song, Shuran},
+  year = 2025,
+  journal = {The International Journal of Robotics Research},
+  volume = {44},
+  number = {10-11},
+  pages = {1684--1704},
+  publisher = {Sage Publications Sage UK: London, England},
+  abstract = {This paper introduces Diffusion Policy, a new way of generating robot behavior by representing a robot's visuomotor policy as a conditional denoising diffusion process. We benchmark Diffusion Policy across 15 different tasks from 4 different robot manipulation benchmarks and find that it consistently outperforms existing state-of-the-art robot learning methods with an average improvement of 46.9\%. Diffusion Policy learns the gradient of the action-distribution score function and iteratively optimizes with respect to this gradient field during inference via a series of stochastic Langevin dynamics steps. We find that the diffusion formulation yields powerful advantages when used for robot policies, including gracefully handling multimodal action distributions, being suitable for high-dimensional action spaces, and exhibiting impressive training stability. To fully unlock the potential of diffusion models for visuomotor policy learning on physical robots, this paper presents a set of key technical contributions including the incorporation of receding horizon control, visual conditioning, and the time-series diffusion transformer. We hope this work will help motivate a new generation of policy learning techniques that are able to leverage the powerful generative modeling capabilities of diffusion models. Code, data, and training details are available (diffusion-policy.cs.columbia.edu).}
+}
+
+@article{tang2025deep,
+  title = {Deep Reinforcement Learning for Robotics: {{A}} Survey of Real-World Successes},
+  author = {Tang, Chen and Abbatematteo, Ben and Hu, Jiaheng and Chandra, Rohan and {Mart{\'\i}n-Mart{\'\i}n}, Roberto and Stone, Peter},
+  year = 2025,
+  journal = {Annual Review of Control, Robotics, and Autonomous Systems},
+  volume = {8},
+  number = {1},
+  pages = {153--188},
+  publisher = {Annual Reviews},
+  abstract = {Reinforcement learning (RL), particularly its combination with deep neural networks referred to as deep RL (DRL), has shown tremendous promise across a wide range of applications, suggesting its potential for enabling the development of sophisticated robotic behaviors. Robotics problems, however, pose fundamental difficulties for the application of RL, stemming from the complexity and cost of interacting with the physical world. This article provides a modern survey of DRL for robotics, with a particular focus on evaluating the real-world successes achieved with DRL in realizing several key robotic competencies. Our analysis aims to identify the key factors underlying those exciting successes, reveal underexplored areas, and provide an overall characterization of the status of DRL in robotics. We highlight several important avenues for future work, emphasizing the need for stable and sample-efficient real-world RL paradigms, holistic approaches for discovering and integrating various competencies to tackle complex long-horizon, open-world tasks, and principled development and evaluation procedures. This survey is designed to offer insights for both RL practitioners and roboticists toward harnessing RL's power to create generally capable real-world robotic systems.}
+}
+
+@phdthesis{powers2023continual,
+  title = {Continual Robot Learning: {{Benchmarks}} and Modular Methods},
+  author = {Powers, Samantha},
+  year = 2023,
+  abstract = {Humans adapt continuously to the world around us, allowing us to acquire new skills and explore diverse environments seamlessly. Current AI methods, however, cannot attain this versatility. Instead, they are typically trained with vast datasets, and learn all tasks simultaneously. However, the trained models have limited ability to adapt to changing contexts, and are limited by available data. This challenge is particularly pronounced in robotics, where real world interaction data is scarce. Instead, we envision a robot capable of continuously learning from both the environment and human interactions, quickly acquiring new information without overwriting past knowledge, and capable of adapting to a user's specific needs. In this thesis, we apply continual learning to robotics, with the goal of enabling crucial capabilities, including: the ability to apply prior information to new settings, maintain old information, sustain capacity for new skills, and understand context. We explore these across two learning modes: continual reinforcement learning (CRL), where the agent learns from experience, and continual imitation learning (CIL), where it learns from demonstrations. However, substantial barriers hinder progress, including limited open-source resources, resource-intensive benchmarks, and impractical metrics for robotics. To address these challenges, we present CORA (COntinual Reinforcement Learning Agents), an open-source toolkit with benchmarks, baselines, and metrics to enhance CRL accessibility. CORA extends beyond catastrophic forgetting, evaluating models for forward transfer and generalization. With this foundation, we introduce SANE (Self-Activating Neural Ensembles) to create a dynamic library of adaptable skills. SANE's ensemble of independent modules learns and applies skills as needed, reducing forgetting. We demonstrate this method on several Procgen reinforcement learning task sets. We then adapt SANE to a physical robot, the Stretch, with SANER (SANE for Robotics) using CIL. Leveraging our novel Attention-Based Interaction Policies (ABIP), SANER excels in few-shot learning, showcasing its effectiveness at generalization across various tasks. SANERv2 further advances this capability, integrating natural language and achieving strong performance over a diverse set of 15 manipulation tasks in a simulated environment, RLBench. Remarkably, SANERv2 was also able to display the potential of independent modules, demonstrating that a node could be moved between agents without loss of performance, promising possible future composable ensembles.},
+  school = {Carnegie Mellon University}
+}
+
+@article{yuan2026fastwam,
+  title = {Fast-Wam: {{Do}} World Action Models Need Test-Time Future Imagination?},
+  author = {Yuan, Tianyuan and Dong, Zibin and Liu, Yicheng and Zhao, Hang},
+  year = 2026,
+  journal = {arXiv preprint arXiv:2603.16666},
+  eprint = {2603.16666},
+  abstract = {World Action Models (WAMs) have emerged as a promising alternative to Vision-Language-Action (VLA) models for embodied control because they explicitly model how visual observations may evolve under action. Most existing WAMs follow an imagine-then-execute paradigm, incurring substantial test-time latency from iterative video denoising, yet it remains unclear whether explicit future imagination is actually necessary for strong action performance. In this paper, we ask whether WAMs need explicit future imagination at test time, or whether their benefit comes primarily from video modeling during training. We disentangle the role of video modeling during training from explicit future generation during inference by proposing Fast-WAM, a WAM architecture that retains video co-training during training but skips future prediction at test time. We further instantiate several Fast-WAM variants to enable a controlled comparison of these two factors. Across these variants, we find that Fast-WAM remains competitive with imagine-then-execute variants, while removing video co-training causes a much larger performance drop. Empirically, Fast-WAM achieves competitive results with state-of-the-art methods both on simulation benchmarks (LIBERO and RoboTwin) and real-world tasks, without embodied pretraining. It runs in real time with 190ms latency, over 4\texttimes{} faster than existing imagine-then-execute WAMs. These results suggest that the main value of video prediction in WAMs may lie in improving world representations during training rather than generating future observations at test time. Project page: https://yuantianyuan01.github.io/FastWAM/},
+  archiveprefix = {arXiv}
+}
+
+@article{chen2026robot,
+  title = {Robot Self-Improvement via Human-Video Dynamics Models},
+  author = {Chen, Hanzhi and Zhang, Anran and Schaefer, Simon and Chen, Kejia and Chen, Shi and Cremers, Daniel and Mees, Oier and Leutenegger, Stefan},
+  year = 2026,
+  journal = {arXiv preprint arXiv:2606.21406},
+  eprint = {2606.21406},
+  abstract = {A central question in robot learning is how to acquire skills from the kinds of data that humans learn from: passive observation, embodied practice, and the experience of failure. Human videos provide the first of these in abundance, and prior work has shown they can initialize useful policies. Far less clear is whether they can support the second and third: whether priors extracted from human videos can ground a robot's own attempts well enough to evaluate them, correct them, and improve from them. In this work, we show that human videos can be used to learn embodiment-agnostic action, dynamics, and value representations that transfer across robot embodiments, providing the predictive foundation required for robots to autonomously improve from their own rollouts and failures. We introduce Dynamics-Guided Action Correction (DGAC), a training-free approach that leverages these adapted models to repair failed states: each failure becomes a query for which the learned models propose and rank corrective actions, turning failures into supervision for the next policy update. Across seven real-world manipulation tasks spanning both a mobile manipulator and a static manipulator arm, our approach improves success rates from 40\% to 81\% across multiple policy backbones, demonstrating cross-embodiment robot self-improvement from human-video priors. These results show that human priors and robot failures can be combined to enable scalable autonomous policy improvement. Project page: https://ethz-mrl.github.io/robot-self-improvement-website/.},
+  archiveprefix = {arXiv}
+}
+
+@misc{liao2026supermimic,
+  title = {{{SuperMimic}}: {{Scaling Humanoid Whole-Body Control}} with {{One Differentiable World Model}}},
+  author = {Liao, Qiayuan and Shao, Yiyang and Long, Junfeng and Zakka, Kevin and Horowitz, Roberto and Abbeel, Pieter and Sreenath, Koushil},
+  year = 2026,
+  month = nov,
+  number = {arXiv:2610.28480},
+  eprint = {2610.28480},
+  primaryclass = {cs.RO},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2610.28480},
+  url = {http://arxiv.org/abs/2610.28480},
+  abstract = {Tracking large human-motion datasets has become the dominant route to general, expressive humanoid whole-body control, but scaling across many motions is expensive. Current pipelines use model-free reinforcement learning, either merging per-motion specialists through lossy distillation, or brute-forcing a single policy with cluster-scale compute. SuperMimic amortizes learning across all motions with one differentiable world model of their shared dynamics, fit from logged transitions of a standard rigid-body simulator. The world model and the tracking policy train together in one loop, and backpropagation-through-time over short imagined rollouts gives the policy analytic gradients. Fast imagined rollouts and analytic gradients make policy learning efficient. In 3 hours on a single GPU, SuperMimic surpasses the return of a state-of-the-art motion tracker baseline trained for 7 days on 128 GPUs. It reduces GPU-hours by more than \$1000\textbackslash times\$ and fails on only 25 of 129,514 benchmark motions, versus 179 failures for the baseline. After 9.8 hours on two GPUs, SuperMimic achieves zero failures. From 1 to 264 hours of motion, the world model's prediction error stays stable, and GPU-hours to a target return grow slowly. Our policy transfers to a physical Unitree G1 across diverse and acrobatic motions. SuperMimic removes compute as the bottleneck to scaling humanoid whole-body control, making it practical to measure motion-tracking scaling laws.},
+  archiveprefix = {arXiv},
 }
