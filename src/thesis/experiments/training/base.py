@@ -23,6 +23,13 @@ from ...utils.wandb import log_eval, log_metrics, log_model_summary, read_summar
 _AMP_DTYPE = {"no": None, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
+def _release_cuda_cache():
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _improved(value, best, mode):
     """Whether `value` beats `best` under `best_mode` (configs/base.yaml)."""
     return value > best if mode == "max" else value < best
@@ -82,6 +89,12 @@ class TrainingMixin:
             persistent_workers=num_workers > 0,
         )
         loader = acc.prepare(loader)
+        # samples drawn per optimizer step across every rank; a resume restarts the count
+        # from its step, which assumes the batch geometry it trained with
+        samples_per_step = batch_size * accum_steps * acc.num_processes
+        dataset_size = len(self.dataset)
+        acc.print(f"dataset: {dataset_size} samples, {samples_per_step} per step, "
+                  f"{dataset_size / samples_per_step:.1f} steps per epoch")
         total_steps = exp.max_steps
         sched = build_lr_scheduler(opt, exp.get("lr_warmup_steps", 0), total_steps,
                                    exp.get("lr_schedule", "cosine"))
@@ -195,8 +208,11 @@ class TrainingMixin:
                     loss_ema = loss_val
                 elif math.isfinite(loss_val):
                     loss_ema = ema_beta * loss_ema + (1 - ema_beta) * loss_val
+                samples_seen = (step + 1) * samples_per_step
+                epoch = samples_seen / dataset_size
                 if step % exp.log_every == 0:
-                    acc.print(f"step {step}  loss {loss_val:.4f}  ema {loss_ema:.4f}"
+                    acc.print(f"step {step}  samples {samples_seen}  epoch {epoch:.3f}"
+                              f"  loss {loss_val:.4f}  ema {loss_ema:.4f}"
                               f"  data {data_time:.3f}s  compute {compute_time:.3f}s"
                               + (f"  aug {aug_time:.3f}s" if self._batch_augmenter is not None else ""))
                     if acc.is_main_process:
@@ -208,7 +224,8 @@ class TrainingMixin:
                             {"train/loss": loss_val, "train/loss_ema": loss_ema,
                              "train/lr": sched.get_last_lr()[0],
                              "train/data_time": data_time, "train/compute_time": compute_time,
-                             "train/aug_time": aug_time, **stream_metrics},
+                             "train/aug_time": aug_time, "train/samples_seen": samples_seen,
+                             "train/epoch": epoch, **stream_metrics},
                             step=step,
                         )
                 window = {}
@@ -522,6 +539,9 @@ class TrainingMixin:
             backup = copy.deepcopy(model.state_dict())
             ema.copy_to(model)
         was_training = model.training
+        # the training step's cached activations would otherwise sit beside everything the
+        # eval allocates (a planner's rollouts, a simulator), on a card the two must share
+        _release_cuda_cache()
         try:
             result = build_eval(self.root_cfg.eval).run(model)
             log_eval(result, step=step)
@@ -530,3 +550,4 @@ class TrainingMixin:
             if backup is not None:
                 model.load_state_dict(backup)
             model.train(was_training)
+            _release_cuda_cache()
