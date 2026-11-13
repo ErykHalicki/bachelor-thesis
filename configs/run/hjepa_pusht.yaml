@@ -1,0 +1,35 @@
+# @package _global_
+# Two-level H-JEPA on the LeWM Push-T expert data, with the reference's pusht_hjepa_l2 recipe
+# (batch 128, AdamW 5e-5, wd 1e-3, clip 1.0), scored in training by LeWM's Push-T protocol
+# (eval/pusht_goal.yaml: 50 dataset states, goal 25 steps ahead, 50-step budget) planned with
+# the reference's pusht_l2 hierarchical planner. One eval of 50 tasks takes ~10 min.
+#
+#   sbatch scripts/local/train.sbatch run=hjepa_pusht
+defaults:
+  - override /dataset: pusht_expert
+  - override /algorithm: hjepa_pusht
+  - override /eval: pusht_goal
+
+best_metric: success_rate
+best_mode: max
+
+experiment:
+  eval_every: 10000
+  save_every: 2000
+  # the reference's 9 epochs: 1,684,899 windows of 35 rows / 128 per step
+  max_steps: 118500
+  # what `auto` calibrates this model to on the 16 GB V100 (88 fits), split into 2 x 64
+  batch_size: 64
+  effective_batch: 128
+  lr_warmup_steps: 500
+  # the reference trains with bf16 autocast; the V100 has no bf16, and fp16 is its stand-in
+  mixed_precision: fp16
+  grad_clip: 1.0
+  optimizer:
+    name: adamw
+    lr: 5.0e-5
+    weight_decay: 1.0e-3
+
+dataset:
+  slices: null
+  augment: null

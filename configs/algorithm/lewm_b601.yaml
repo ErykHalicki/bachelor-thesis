@@ -1,0 +1,31 @@
+# Flat LeWorldModel: H-JEPA's level 1 alone (`num_levels: 1`), planned flat. The baseline
+# the hierarchy is measured against, on the same data and encoder.
+defaults:
+  - hjepa_b601
+  - _self_
+
+num_levels: 1
+level2: null
+
+plan:
+  receding_horizon: 2
+  levels:
+    level1: {horizon: 5, pre_decay_horizon: null, cost_last_n: 2, action_cost_weight: 0.0}
+    level2: null
+  solvers:
+    level1: {num_samples: 300, optimizer_kwargs: {lr: 0.3}}
+    level2: null
+
+conditioning:
+  scene_context:
+    from: ${algorithm.fields.pixels}
+    index: "0"
+
+predict:
+  scene_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..3"
+    raw_index: "6..18:6"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..23"

@@ -1,0 +1,51 @@
+# Three-level H-JEPA whose level-1 encoder is one ViT over the scene camera, the wrist
+# camera and the robot's joint state: both cameras' patch tokens and a proprio token share
+# one transformer and one CLS, the state every level above builds on and planning compares.
+# The wrist view and the gripper joints are what the front camera alone barely encoded
+# (a linear probe of the front-only latent recovered gripper opening at R^2 0.35).
+defaults:
+  - hjepa_ocbench_l3
+  - _self_
+
+fields:
+  pixels: observation.images.front
+  views: [observation.images.wrist]
+  proprio: qpos          # robot joints only (the dataset slices off the cube's free joint)
+  action: action
+
+level1:
+  encoder:
+    type: fused_vit
+    scale: tiny
+    num_views: 2
+    proprio_dim: 14
+    projector:
+      type: mlp
+
+conditioning:
+  front_context:
+    from: ${algorithm.fields.pixels}
+    index: "0"
+  wrist_context:
+    from: observation.images.wrist
+    index: "0"
+  qpos_context:
+    from: qpos
+    index: "0"
+
+predict:
+  front_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..12"
+    raw_index: "25..300:25"
+  wrist_future:
+    from: observation.images.wrist
+    index: "1..12"
+    raw_index: "25..300:25"
+  qpos_future:
+    from: qpos
+    index: "1..12"
+    raw_index: "25..300:25"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..324"

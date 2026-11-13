@@ -1,0 +1,33 @@
+# @package _global_
+# Three-level H-JEPA on OCBench block-single with the front camera, wrist camera and joint
+# state fused in one ViT, scored in training by goal-reaching from held-out demo states.
+defaults:
+  - hjepa_ocbench_block_single
+  - override /algorithm: hjepa_ocbench_fused_l3
+  - override /eval: ocbench_goal
+  - _self_
+
+dataset:
+  # the robot's 6 arm + 8 gripper joints; the cube's free joint (qpos 14..20) is privileged
+  slices:
+    qpos: "qpos.[0-9], qpos.1[0-3]"
+  normalize:
+    keys: [action, qpos]
+    method: mean_std
+
+experiment:
+  # two cameras per frame double the decode, and the step is longer: auto-calibrated
+  batch_size: auto
+  effective_batch: 129
+  # 5 x ~30 samples/s (two cameras each) cover the ~81 samples/s a 1.6 s step takes; more
+  # workers stay resident through evals and push the job past its RAM
+  num_workers: 5
+  eval_every: 2500
+
+eval:
+  cameras: [front, wrist]
+  pixel_cameras: [front, ur5e/wrist]
+  goal_image: null
+  episodes: 50
+  num_envs: 50
+  num_workers: 2

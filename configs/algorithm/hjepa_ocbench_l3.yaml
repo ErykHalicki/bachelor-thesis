@@ -1,0 +1,78 @@
+# Three-level H-JEPA on OCBench block-single: the reference Cube l3 model (level 3 is a
+# stride-2 chunk of level 2, which is a stride-2 chunk of level 1). One level-1 step is one
+# stored frame (25 control steps), so level 2 spans 50 and level 3 100 control steps. A
+# sample spans the 13 level-1 steps level 3 needs: ((4 - 1) * 2 + 1 - 1) * 2 + 1, i.e. 325
+# control steps. Block-single episodes run ~650 steps, hence the top level plans 4 steps.
+defaults:
+  - hjepa_ocbench
+  - _self_
+
+num_levels: 3
+
+level3:
+  lr: 1.0e-05
+  stride: 2
+  window_size: 1
+  wm:
+    history_size: 3
+    rollout_n: 1
+    rollout_loss_weight: 1.0
+    embed_dim: 192
+    use_proprio: false
+  encoder:
+    type: latent_mlp
+    input_dim: ${algorithm.level2.wm.embed_dim}
+    hidden_dim: 384
+    final_ln: false
+    output_dim: ${algorithm.level3.wm.embed_dim}
+    projector:
+      type: identity
+  action_encoder:
+    output_dim: 4
+    input_dim: ${algorithm.level2.wm.embed_dim}
+    max_chunk: 3
+    queue_size: 4000
+  action_embed:
+    patch_embed: false
+    input_dim: ${algorithm.level3.action_encoder.output_dim}
+  predictor:
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+    hidden_dim: 192
+    projector:
+      type: mlp
+  loss:
+    embed:
+      sigreg:
+        enabled: true
+        weight: 0.09
+
+# the reference's cube_l3 planner with a top horizon sized to these longer episodes. Levels 2
+# and 3 optimize 800 plans per world through a depth-6 predictor with gradients, so they
+# solve 4 worlds at a time (3,200 plans): all 50 of a wave at once OOMs even a free V100,
+# and the eval shares the card with the training state. Level 1 (25 plans) takes the wave.
+plan:
+  receding_horizon: 2
+  levels:
+    level1: {horizon: 2, pre_decay_horizon: 2, cost_last_n: 2, action_cost_weight: 0.2}
+    level2: {horizon: 2, cost_last_n: 1}
+    level3: {horizon: 4, cost_last_n: 1}
+  solvers:
+    level1: {num_samples: 25}
+    level2: {name: gd, n_steps: 30, min_its: 10, batch_size: 25, var_scale: 1.0, num_samples: 100,
+             action_noise: 0.01, seed: 42, optimizer: AdamW, optimizer_kwargs: {lr: 0.075}}
+    level3: {name: gd, n_steps: 30, min_its: 10, batch_size: 25, var_scale: 1.0, num_samples: 100,
+             action_noise: 0.01, seed: 42, optimizer: AdamW, optimizer_kwargs: {lr: 0.075}}
+
+predict:
+  front_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..12"
+    raw_index: "25..300:25"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..324"

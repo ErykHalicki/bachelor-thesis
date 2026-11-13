@@ -14,3 +14,6 @@
 [submodule "external/levjepa"]
 	path = external/levjepa
 	url = https://github.com/MLO-lab/LeVJEPA
+[submodule "external/h-jepa"]
+	path = external/h-jepa
+	url = https://github.com/kevinghst/H-JEPA

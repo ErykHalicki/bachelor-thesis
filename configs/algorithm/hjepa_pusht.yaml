@@ -1,0 +1,44 @@
+# Two-level H-JEPA on Push-T: the reference's pusht_hjepa_l2 (ViT-tiny on 224 px, frameskip 5,
+# level 2 stride 2) and the planner of its pusht_l2 eval. A sample spans the 7 level-1 steps
+# level 2 needs, (4 - 1) * 2 + 1, i.e. 35 raw rows, 3.5 s.
+defaults:
+  - hjepa_common
+  - _self_
+
+fields:
+  pixels: observation.image
+  action: action
+
+frameskip: 5
+level1:
+  wm:
+    action_dim: 2
+
+conditioning:
+  scene_context:
+    from: ${algorithm.fields.pixels}
+    index: "0"
+
+predict:
+  scene_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..6"
+    raw_index: "5..30:5"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..34"
+
+plan:
+  eval_budget: 90
+  receding_horizon: 2
+  levels:
+    level1: {horizon: 2, pre_decay_horizon: 2, cost_last_n: 2, action_cost_weight: 0.2}
+    level2: {horizon: 8, cost_last_n: 1}
+  solvers:
+    level1:
+      num_samples: 50
+      optimizer_kwargs: {lr: 0.1}
+    level2:
+      num_samples: 400
+      action_noise: 0.01
+      optimizer_kwargs: {lr: 0.075}

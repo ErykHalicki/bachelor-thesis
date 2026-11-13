@@ -1,0 +1,35 @@
+# Two-level H-JEPA on OCBench block-single from the front camera: the reference Cube model
+# with one level-1 step per stored frame, i.e. 25 control steps and a 175-d action block.
+# A sample spans the 7 level-1 steps level 2 needs (175 control steps, 3.5 s).
+defaults:
+  - hjepa_common
+  - _self_
+
+fields:
+  pixels: observation.images.front
+  action: action
+
+frameskip: 25
+level1:
+  wm:
+    action_dim: 7
+
+plan:
+  solvers:
+    # every world of an eval wave in one batch
+    level1: {batch_size: null}
+    level2: {batch_size: null}
+
+conditioning:
+  front_context:
+    from: ${algorithm.fields.pixels}
+    index: "0"
+
+predict:
+  front_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..6"
+    raw_index: "25..150:25"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..174"

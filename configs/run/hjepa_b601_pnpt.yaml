@@ -1,0 +1,39 @@
+# @package _global_
+# Two-level H-JEPA world model on the pnpT demonstrations: trained end to end, scored on the
+# held-out episodes by its losses and by open-loop planning toward each window's last frame.
+# On the robot it plans toward a goal image like any world model:
+#
+#   python main.py run=hjepa_b601_pnpt
+#   python main.py run=hjepa_b601_pnpt load=<run_id> experiment.tasks=[validation] \
+#       eval=b601_zed_only eval.goal_image=<end-state.png> eval.server=eryk-pc:8080
+defaults:
+  - override /dataset: b601_pnpt
+  - override /algorithm: hjepa_b601
+  - override /eval: holdout_plan
+
+best_metric: loss
+best_mode: min
+
+experiment:
+  eval_every: 500
+  max_steps: 30000
+  batch_size: 128
+  effective_batch: 128
+  lr_warmup_steps: 500
+  # the reference trains with bf16 autocast; the V100 has no bf16, and fp16 is its stand-in
+  mixed_precision: fp16
+  grad_clip: 1.0
+  optimizer:
+    name: adamw
+    lr: 5.0e-5
+    weight_decay: 1.0e-3
+
+dataset:
+  image_size: [224, 224]
+  # the pixel-only model reads no state column, and a slice of an unread field is an error
+  slices: null
+  # the reference z-scores actions and proprio, and its planner's prior is N(0, 1) on them
+  normalize:
+    keys: [action]
+    method: mean_std
+  augment: null

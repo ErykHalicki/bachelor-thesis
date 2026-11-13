@@ -1,0 +1,29 @@
+# Two-level H-JEPA on the b601 arm: the reference Cube model on the scene camera at 30 fps.
+# One level-1 step is 6 rows (5 Hz), level 2 is stride 2 (2.5 Hz). A sample spans the
+# 7 level-1 steps level 2 needs: (4 - 1) * 2 + 1, i.e. 42 raw rows, 1.4 s.
+defaults:
+  - hjepa_common
+  - _self_
+
+fields:
+  pixels: observation.images.zed_left
+  action: action
+
+frameskip: 6
+level1:
+  wm:
+    action_dim: 7
+
+conditioning:
+  scene_context:
+    from: ${algorithm.fields.pixels}
+    index: "0"
+
+predict:
+  scene_future:
+    from: ${algorithm.fields.pixels}
+    index: "1..6"
+    raw_index: "6..36:6"
+  action:
+    from: ${algorithm.fields.action}
+    index: "0..41"

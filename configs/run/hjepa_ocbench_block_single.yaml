@@ -1,0 +1,47 @@
+# @package _global_
+# H-JEPA planning closed-loop in OCBench block-single: trained on the scripted demos (as a
+# LeRobot dataset) from the front camera, then every episode plans toward one goal frame
+# (the cube on its fixed target) and is scored by the simulator's success check.
+#
+#   python main.py run=hjepa_ocbench_block_single eval.goal_image=<goal.png>
+defaults:
+  - override /dataset: ocbench_block_single_lerobot
+  - override /algorithm: hjepa_ocbench_l3
+  - override /eval: ocbench
+
+# one sample per stored frame: anchors on the 25-step render grid
+subsample_streams:
+  "observation.images.*": {every: 25}
+
+best_metric: success_rate
+best_mode: max
+
+experiment:
+  # what `auto` calibrates to on the 16 GB V100 (63 fits; split into 3 x 43), fixed so a run
+  # starts without the ~3 min search
+  batch_size: 43
+  effective_batch: 129
+  max_steps: 20000
+  # 5 workers outpace the step by ~1.5x (60 samples/s each vs 129 per 0.7 s step); each
+  # costs ~1-2 GB of RAM, so more only takes memory from the desktop
+  num_workers: 5
+  eval_every: 5000
+  save_every: 1000
+  lr_warmup_steps: 500
+  mixed_precision: fp16
+  grad_clip: 1.0
+  optimizer:
+    name: adamw
+    lr: 5.0e-5
+    weight_decay: 1.0e-3
+
+eval:
+  episodes: 50
+  num_envs: 50
+  pixel_cameras: [front]
+  pixel_size: 224
+  pixel_interval: 25
+  goal_image: /mnt/hdd/hjepa/ocbench_goal_front.png
+  holdout: true
+  batch_size: 32
+  max_batches: 10

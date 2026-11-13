@@ -22,7 +22,7 @@ conditioning:
     block_size: 2                   # steps per causal attention block (default 1)
 ```
 
-`index` accepts a list of ints or inclusive ranges: `"0..47"`, `"-12..-1"`, `"-8..-2, 0"`.
+`index` accepts a list of ints or inclusive ranges: `"0..47"`, `"-12..-1"`, `"-8..-2, 0"`, and strided ranges `"6..36:6"` (every 6th row, the upper bound included when it is hit).
 
 Who reads which keys:
 
@@ -103,7 +103,8 @@ An entry reading the `action` field claims the role by convention when nothing d
 it, so configs written before the role keep working. Declaring it twice in one spec is a
 build-time error, and a model whose `predict:` has no action stream is a world model:
 `ChunkDriver` refuses it by name. `PlanDriver` (`eval.goal_image`) is the on-robot path for
-one, but it needs a model exposing `plan()`, and none ships in this repo.
+one: it needs a model exposing `make_planner(plan)` and `plan(planner, obs, goal,
+steps_taken)`, which `hjepa` does (see `src/thesis/planning/README.md`).
 
 An action entry in `conditioning:` is a past-action history, and its offsets must all be
 negative — a rollout only knows actions it has already executed. It is the one conditioning

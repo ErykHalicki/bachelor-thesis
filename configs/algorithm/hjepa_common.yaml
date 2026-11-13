@@ -1,0 +1,124 @@
+# H-JEPA (Zhang et al. 2026, external/h-jepa). The level sections are the reference's schema
+# verbatim: this file is its OGBench Cube / Push-T model (ViT-tiny on 224 px, patch 14, two
+# levels of stride 2) and the planner of its `cube_l2` eval. An arm sets `fields`,
+# `frameskip`, `level1.wm.action_dim` and the data windows (see algorithms/hjepa/world_model.py).
+name: hjepa
+
+fields:
+  pixels: ???
+  action: action
+  proprio: null
+
+frameskip: 5
+img_size: 224
+patch_size: 14
+num_levels: 2
+sparse_level1_encode: true
+
+level1:
+  lr: 5.0e-05
+  wm:
+    history_size: 3
+    rollout_n: 1
+    rollout_loss_weight: 1.0
+    embed_dim: 192
+    use_proprio: false
+    action_dim: ???
+  encoder:
+    type: vit
+    scale: tiny
+    projector:
+      type: mlp
+  predictor:
+    depth: 4
+    heads: 8
+    mlp_dim: 1024
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+    hidden_dim: 192
+    projector:
+      type: mlp
+  loss:
+    embed:
+      sigreg:
+        enabled: true
+        weight: 0.09
+
+level2:
+  lr: 1.0e-05
+  stride: 2
+  window_size: 1
+  wm:
+    history_size: 3
+    rollout_n: 1
+    rollout_loss_weight: 1.0
+    embed_dim: 192
+    use_proprio: false
+  encoder:
+    type: latent_mlp
+    input_dim: ${algorithm.level1.wm.embed_dim}
+    hidden_dim: 384
+    final_ln: false
+    output_dim: ${algorithm.level2.wm.embed_dim}
+    projector:
+      type: identity
+  action_encoder:
+    output_dim: 4
+    input_dim: ${algorithm.level1.wm.embed_dim}
+    max_chunk: 3          # stride + 1
+    queue_size: 4000
+  action_embed:
+    patch_embed: false
+    input_dim: ${algorithm.level2.action_encoder.output_dim}
+  predictor:
+    depth: 6
+    heads: 16
+    mlp_dim: 2048
+    dim_head: 64
+    dropout: 0.1
+    emb_dropout: 0.0
+    hidden_dim: 192
+    projector:
+      type: mlp
+  loss:
+    embed:
+      sigreg:
+        enabled: true
+        weight: 0.09
+
+# Planning (thesis.planning). Any registered solver per level: `gd` (the paper's), `cem`, or
+# your own via register_solver. An eval's `plan:` is merged on top of this.
+# eval_budget: environment steps over which horizons decay to 1; null keeps them fixed
+# (the open-ended real-robot case).
+plan:
+  eval_budget: null
+  receding_horizon: 2
+  levels:
+    level1: {horizon: 2, pre_decay_horizon: 2, cost_last_n: 2, action_cost_weight: 0.2}
+    level2: {horizon: 2, cost_last_n: 1}
+  solvers:
+    level1:
+      name: gd
+      # not in the reference, whose simulators clip to their action space: nothing on a
+      # robot does, and gradient descent through a poorly trained model walks actions out to
+      # ~10 sigma. Clips the normalized actions to +-3 sigma of the data. null = reference
+      action_clip_sigma: 3.0
+      n_steps: 90
+      batch_size: 1
+      var_scale: 1.0
+      num_samples: 400
+      action_noise: 0.0
+      seed: 42
+      optimizer: AdamW
+      optimizer_kwargs: {lr: 0.1}
+    level2:
+      name: gd
+      n_steps: 90
+      batch_size: 1
+      var_scale: 1.0
+      num_samples: 100
+      action_noise: 0.01
+      seed: 42
+      optimizer: AdamW
+      optimizer_kwargs: {lr: 0.075}

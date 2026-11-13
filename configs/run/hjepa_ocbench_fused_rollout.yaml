@@ -1,0 +1,6 @@
+# @package _global_
+# hjepa_ocbench_fused with the model trained on multi-step rollouts and noisy actions.
+defaults:
+  - hjepa_ocbench_fused
+  - override /algorithm: hjepa_ocbench_fused_rollout_l3
+  - _self_

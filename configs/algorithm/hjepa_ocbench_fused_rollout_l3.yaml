@@ -1,0 +1,19 @@
+# The fused three-level H-JEPA trained to stay accurate along a plan. A planner optimizing
+# against the one-step-trained model found actions it predicted well and reality did not
+# (prediction error 0.04 on demonstrated actions, 0.57 on optimized ones): here levels 1 and
+# 2 also train on 4-step autoregressive rollouts, and the actions carry small noise so the
+# predictor sees the neighbourhood of the demonstrations, not only the demonstrations.
+defaults:
+  - hjepa_ocbench_fused_l3
+  - _self_
+
+action_noise_std: 0.1    # normalized units: a tenth of the data's spread
+
+level1:
+  wm:
+    rollout_n: 4
+    rollout_loss_weight: 1.0
+level2:
+  wm:
+    rollout_n: 4
+    rollout_loss_weight: 1.0
