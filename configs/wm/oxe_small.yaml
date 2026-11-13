@@ -1,0 +1,76 @@
+# A small Open-X mixture for the mixed-embodiment world model (docs/multi_embodiment_data.md).
+# Datasets are the lerobot/* v3.0 revisions, re-encoded by thesis.mixture.reencode.
+
+seed: 0
+data_root: ~/data/oxe/fit320x240   # native aspect, shrunk to fit 320x240, never enlarged
+embodiments_dir: configs/mixture/embodiments
+out_dir: outputs/wm/oxe_small
+resume: false
+
+clock:
+  f_wm: 2.5        # world-model steps per second; divides every member's frame rate evenly
+  steps: 8         # frames per window, so 7 predicted transitions over 2.8 s
+
+mixture:
+  temperature: 0.5 # p_i proportional to hours_i ** temperature
+  overrides: {}
+  members:
+    - taco_play
+    - jaco_play
+    - berkeley_fanuc
+    - utaustin_mutex
+    - ucsd_pick_place
+    - stanford_hydra
+    - stanford_robocook
+    - toto
+
+cameras:
+  roles: null      # e.g. [exterior, wrist]; null keeps every camera
+  max_views: 2     # per sample; which views survive is drawn at random
+
+val:
+  fraction: 0.05   # of each member's episodes, held out by the manifest
+  windows_per_member: 64
+  context: 3       # true frames given before the autoregressive rollout
+  every: 500
+
+model:
+  latent_dim: 256
+  proj_hidden: 2048
+  max_steps: 32
+  camera_embedding: per_embodiment_camera
+  encoder:
+    arch: vit_large
+    checkpoint: pretrained   # LeVJEPA VideoMix ViT-L
+    img_size: 224
+    repeat: 1                # frames per still; 16 is the published protocol at 16x the cost
+    train_blocks: null       # null trains the whole encoder
+    grad_checkpoint: true
+  predictor:
+    dim: 384
+    depth: 6
+    heads: 6
+  sigreg:
+    weight: 0.09
+    num_proj: 1024
+
+probe:
+  img_size: 224
+  patch_size: 16
+  hidden_dim: 384
+  depth: 4
+  heads: 6
+  images_per_step: 64
+
+train:
+  steps: 10000
+  batch_size: 16
+  workers: 4
+  lr: 3.0e-4
+  encoder_lr: 2.0e-5
+  probe_lr: 3.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  final_lr_scale: 0.1
+  grad_clip: 1.0
+  log_every: 25
