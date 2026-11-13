@@ -27,6 +27,8 @@ set -euo pipefail
 SCRATCH=/scratch/st-dushan20-1/ehalicki
 # unbuffered: a job's stdout is a file, so prints otherwise sit in an 8 KB buffer for ~30 min
 export MUJOCO_GL=egl WANDB_MODE=offline PYTHONUNBUFFERED=1
+# the home dir is read-only on compute nodes, where warp compiles a new env's kernels
+export WARP_CACHE_PATH=$SCRATCH/warp_cache
 export WANDB_DIR=$SCRATCH/wandb/run WANDB_CACHE_DIR=$SCRATCH/wandb/cache WANDB_DATA_DIR=$SCRATCH/wandb/data
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
 
