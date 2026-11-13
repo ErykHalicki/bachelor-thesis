@@ -11,6 +11,10 @@ anything else, so a term can only ever touch what it is meant to:
                        score in raw space (`ae_recon`, a raw-space `integration`)
     ctx["integrated"]  the ODE endpoint per flow stream, present only when an `integration`
                        term asked for the (expensive) differentiable solve
+    ctx["valid"]       per predict stream, (B, N) bool target validity, present for streams
+                       declaring `valid:` (padded camera slots, steps past an episode end)
+    ctx["rollout"]     per `rollout` term label, its autoregressive rollout's per-step
+                       (pred, target, valid) triples
 
 A term's `weight` also decides WHEN it runs. `weight: 0.0` makes it an observed term: evals
 compute and report it under the usual `loss/<label>` name, training skips it entirely and
@@ -31,7 +35,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 __all__ = ["SIGReg", "PredictionLoss", "SIGRegLoss", "AEReconLoss", "IntegrationLoss",
-           "build_loss_term"]
+           "RolloutLoss", "masked_error", "build_loss_term"]
+
+
+def masked_error(pred, target, valid=None, norm="mse", per_step=None):
+    """Mean error between (B, N, D) tensors over the tokens `valid` (B, N) keeps.
+
+    The error is averaged over D per token first. `per_step` (tokens per time step) makes
+    every valid step count once whatever its number of valid tokens -- the average over a
+    step's valid tokens, then over the valid steps -- which is how RoboJEPA weighs a
+    one-camera and a two-camera clip (each view group is its own rank, averaged per frame).
+    Without it, every valid token counts once.
+    """
+    err = (pred - target).abs() if norm == "l1" else (pred - target).square()
+    err = err.float().mean(-1)
+    if valid is None:
+        valid = torch.ones_like(err, dtype=torch.bool)
+    w = valid.to(err.dtype)
+    if per_step and per_step > 1:
+        B, N = err.shape
+        err, w = err.view(B, N // per_step, per_step), w.view(B, N // per_step, per_step)
+        count = w.sum(-1)
+        step_err = (err * w).sum(-1) / count.clamp_min(1)
+        step_ok = (count > 0).to(err.dtype)
+        return (step_err * step_ok).sum() / step_ok.sum().clamp_min(1)
+    return (err * w).sum() / w.sum().clamp_min(1)
 
 
 class SIGReg(nn.Module):
@@ -90,16 +118,76 @@ class PredictionLoss(nn.Module):
     (next latent vs next latent).
     """
 
-    def __init__(self, streams, weight, label="prediction"):
+    def __init__(self, streams, weight, label="prediction", norm="mse", reduce="token",
+                 tokens_per_step=None):
         super().__init__()
+        assert norm in ("mse", "l1"), f"unknown prediction norm '{norm}'"
+        assert reduce in ("token", "step"), f"unknown prediction reduce '{reduce}'"
         self.streams = list(streams)
         self.weight = weight
+        self.norm = norm
+        self.reduce = reduce
+        self.tokens_per_step = tokens_per_step or {}
         # a single-stream term logs under its stream name; a term spanning several
         # logs under the loss type's label
         self.label = self.streams[0] if len(self.streams) == 1 else label
 
     def forward(self, ctx):
-        return sum(F.mse_loss(ctx["pred"][n], ctx["target"][n]) for n in self.streams)
+        valid = ctx.get("valid") or {}
+        if self.norm == "mse" and self.reduce == "token" and not any(
+                n in valid for n in self.streams):
+            return sum(F.mse_loss(ctx["pred"][n], ctx["target"][n]) for n in self.streams)
+        return sum(
+            masked_error(ctx["pred"][n], ctx["target"][n], valid.get(n), self.norm,
+                         self.tokens_per_step.get(n) if self.reduce == "step" else None)
+            for n in self.streams
+        )
+
+
+class RolloutLoss(nn.Module):
+    """Autoregressive rollout error of one `direct` stream (RoboJEPA's L_AR).
+
+    The algorithm (`GenericViTPredictor._forward_rollout`) keeps the true latents up to a
+    prefix step tau, appends the teacher-forced prediction of tau + 1, and then feeds its
+    own predictions back for `steps - 1` more trunk passes, inputs detached. This term
+    scores those `steps - 1` autoregressive predictions against the encoder's latents
+    and divides their sum by `steps` -- RoboJEPA's weighting, where the teacher-forced
+    step (scored by the `prediction` term) is the first of the K rollout steps, so with
+    the prediction term at weight 0.5 and this one at 0.5 the objective is theirs.
+
+    `prefix: random` draws one tau per batch (training), `all` averages over every tau the
+    batch's shortest clip allows (RoboJEPA's held-out eval). The per-step errors are kept
+    in `step_logs` (step 1 = the teacher-forced prediction), for `loss/<label>/step<k>`.
+    """
+
+    def __init__(self, stream, steps, weight, prefix="random", norm="l1", reduce="step",
+                 tokens_per_step=None, label=None):
+        super().__init__()
+        assert steps >= 2, "a rollout needs at least 2 steps (1 is teacher forcing)"
+        assert prefix in ("random", "all"), f"unknown rollout prefix '{prefix}'"
+        self.stream = stream
+        self.streams = [stream]
+        self.steps = int(steps)
+        self.prefix = prefix
+        self.weight = weight
+        self.norm = norm
+        self.per_step = (tokens_per_step or {}).get(stream) if reduce == "step" else None
+        self.label = label or f"rollout_{stream}_{self.steps}"
+        self.step_logs = {}
+
+    def forward(self, ctx):
+        rollouts = ctx["rollout"].get(self.label) or []
+        if not rollouts:
+            self.step_logs = {}
+            ref = ctx["pred"][self.stream]
+            return ref.new_zeros(()).float()
+        per_step = [[] for _ in range(self.steps)]
+        for steps in rollouts:
+            for h, (pred, target, valid) in enumerate(steps):
+                per_step[h].append(masked_error(pred, target, valid, self.norm, self.per_step))
+        means = [torch.stack(v).mean() for v in per_step]
+        self.step_logs = {f"step{h + 1}": m.detach() for h, m in enumerate(means)}
+        return sum(means[1:]) / self.steps
 
 
 class AEReconLoss(nn.Module):
@@ -246,13 +334,22 @@ class SIGRegLoss(nn.Module):
     `proj_dim` sets its output width, defaulting to the stream dim. A square head is
     initialized to the identity, so the default measures the raw latents at init and only
     departs from them as it learns; a narrower `proj_dim` gets the usual random init.
+
+    `head: mlp` swaps the linear head for LeWM's projector, Linear -> BatchNorm -> GELU ->
+    Linear with a `proj_hidden`-wide hidden layer (default 2048): the latents feed the
+    predictor and serve as its targets unprojected, and this fork exists only to be
+    regularized. The head runs once on the joined streams (a frame two windows share is
+    one row), so its BatchNorm sees each frame once.
+
+    Tokens `ctx["latent_valid"]` marks invalid -- padded steps, empty camera slots -- are
+    dropped before the head, so they reach neither its BatchNorm statistics nor any bag.
     """
 
     CONCAT_DIMS = {"batch": 0, "temporal": 1, "spatial": 2}
 
     def __init__(self, streams, weight, knots=17, num_proj=1024, proj_dim=None,
                  stream_dims=None, statistic="pooled", stream_frames=None, concat=None,
-                 stream_times=None):
+                 stream_times=None, head="linear", proj_hidden=2048):
         super().__init__()
         assert statistic in ("pooled", "per_timestep", "per_spatial"), (
             f"unknown statistic '{statistic}'"
@@ -295,30 +392,51 @@ class SIGRegLoss(nn.Module):
             )
         in_dim = dims[self.streams[0]]
         out_dim = in_dim if proj_dim is None else int(proj_dim)
-        self.head = nn.Linear(in_dim, out_dim, bias=False)
-        if out_dim == in_dim:
-            # a square head starts as the identity, so omitting proj_dim costs nothing at
-            # init and the term measures the raw latents until the head moves
-            nn.init.eye_(self.head.weight)
-
-    def _score(self, grid):
-        """(B, T, S, D) -> the statistic, averaged over however many bags it splits into."""
-        if self.statistic == "pooled":
-            bags = [grid.flatten(1, 2)]
-        elif self.statistic == "per_timestep":
-            bags = [grid[:, i] for i in range(grid.shape[1])]
+        self.out_dim = out_dim
+        if head == "mlp":
+            hidden = int(proj_hidden)
+            self.head = nn.Sequential(nn.Linear(in_dim, hidden), nn.BatchNorm1d(hidden),
+                                      nn.GELU(), nn.Linear(hidden, out_dim))
+        elif head == "linear":
+            self.head = nn.Linear(in_dim, out_dim, bias=False)
+            if out_dim == in_dim:
+                # a square head starts as the identity, so omitting proj_dim costs nothing
+                # at init and the term measures the raw latents until the head moves
+                nn.init.eye_(self.head.weight)
         else:
-            bags = [grid[:, :, j] for j in range(grid.shape[2])]
+            raise ValueError(f"unknown sigreg head '{head}'; use linear or mlp")
+
+    def _score(self, grid, mask):
+        """(B, T, S, D) latents and their (B, T, S) validity -> the statistic, averaged over
+        the bags it splits into that hold at least two real rows."""
+        if self.statistic == "pooled":
+            bags = [grid.flatten(1, 2)[mask.flatten(1, 2)]]
+        elif self.statistic == "per_timestep":
+            bags = [grid[:, i][mask[:, i]] for i in range(grid.shape[1])]
+        else:
+            bags = [grid[:, :, j][mask[:, :, j]] for j in range(grid.shape[2])]
+        bags = [bag for bag in bags if bag.shape[0] > 1]
+        if not bags:
+            return grid.sum() * 0.0
         return sum(self.sigreg(bag) for bag in bags) / len(bags)
 
     def _grid(self, ctx, name):
         z = ctx["latent"][name]
-        if self.head is not None:
-            z = self.head(z)
         # no concat with the pooled statistic never splits the token axis, so it does
         # not need a real frame count
         t = self.stream_frames.get(name) or 1
-        return z.unflatten(1, (t, -1))
+        z = z.unflatten(1, (t, -1))
+        valid = ctx.get("latent_valid", {}).get(name)
+        mask = (torch.ones(z.shape[:3], dtype=torch.bool, device=z.device) if valid is None
+                else valid.bool().view(z.shape[:3]))
+        return z, mask
+
+    def _project(self, grid, mask):
+        """The head over the real rows only; the rest stay zero and masked."""
+        rows = self.head(grid[mask])
+        out = rows.new_zeros(*grid.shape[:3], rows.shape[-1])
+        out[mask] = rows
+        return out, mask
 
     def _join_temporal(self, grids):
         """Frame slices of every stream, each distinct time kept once.
@@ -327,7 +445,7 @@ class SIGRegLoss(nn.Module):
         shift-by-one target does, at 2 of 4 frames), and those frames are one moment of
         one timestream, not two samples of it. Without times to match on, nothing is
         dropped. The first stream listed wins a tie, which matters only for an encoder
-        whose latent depends on the surrounding window.
+        whose latent depends on the surrounding window. Works on validity masks too.
         """
         if not self.stream_times:
             return torch.cat(grids, dim=1)
@@ -341,9 +459,10 @@ class SIGRegLoss(nn.Module):
         return torch.cat(keep, dim=1)
 
     def forward(self, ctx):
-        grids = [self._grid(ctx, n) for n in self.streams]
+        pairs = [self._grid(ctx, n) for n in self.streams]
+        grids, masks = [g for g, _ in pairs], [m for _, m in pairs]
         if self.concat is None:
-            return sum(self._score(g) for g in grids)
+            return sum(self._score(*self._project(g, m)) for g, m in pairs)
 
         dim = self.CONCAT_DIMS[self.concat]
         kept = [i for i in range(4) if i != dim]
@@ -355,12 +474,14 @@ class SIGRegLoss(nn.Module):
                 f"other axes must match; got {shapes}"
             )
         if self.concat == "temporal":
-            return self._score(self._join_temporal(grids))
-        return self._score(torch.cat(grids, dim=dim))
+            grid, mask = self._join_temporal(grids), self._join_temporal(masks)
+        else:
+            grid, mask = torch.cat(grids, dim=dim), torch.cat(masks, dim=dim)
+        return self._score(*self._project(grid, mask))
 
 
 def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
-                    stream_times=None, modules=None):
+                    stream_times=None, modules=None, tokens_per_step=None):
     """One `losses:` entry -> loss module. `default_streams` is the default set a prediction
     term covers when it names no `stream`/`streams` (all predict streams marked
     `type: flow`/`prediction`). `stream_dims` maps stream name -> latent dim, which every
@@ -377,7 +498,14 @@ def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
         streams = term.get("streams")
         if streams is None:
             streams = [term["stream"]] if term.get("stream") is not None else list(default_streams)
-        return PredictionLoss(streams, weight, label=kind)
+        return PredictionLoss(streams, weight, label=kind, norm=term.get("norm", "mse"),
+                              reduce=term.get("reduce", "token"),
+                              tokens_per_step=tokens_per_step)
+    if kind == "rollout":
+        return RolloutLoss(term["stream"], int(term["steps"]), weight,
+                           prefix=term.get("prefix", "random"), norm=term.get("norm", "l1"),
+                           reduce=term.get("reduce", "step"),
+                           tokens_per_step=tokens_per_step, label=term.get("label"))
     if kind in ("ae_recon", "integration"):
         decoder = term.get("decoder")
         if kind == "ae_recon" and decoder is None:
@@ -399,5 +527,6 @@ def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
             proj_dim=term.get("proj_dim"), stream_dims=stream_dims,
             statistic=term.get("statistic", "pooled"), stream_frames=stream_frames,
             concat=term.get("concat"), stream_times=stream_times,
+            head=term.get("head", "linear"), proj_hidden=int(term.get("proj_hidden", 2048)),
         )
     raise ValueError(f"unknown loss type '{kind}'")

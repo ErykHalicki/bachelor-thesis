@@ -33,11 +33,13 @@ __all__ = [
 POS_AXES = ("time", "height", "width")
 
 
-def make_pos_ids(times, grid=(1, 1)):
-    """Position ids for one stream's tokens: axis name -> (len(times) * H * W,).
+def make_pos_ids(times, grid=(1, 1), views=1):
+    """Position ids for one stream's tokens: axis name -> (len(times) * V * H * W,).
 
     times: seconds relative to decision time t=0. grid: (H, W) patch grid per timestep;
-    (1, 1) attaches no spatial extent (h=w=0). Tokens are ordered time-major.
+    (1, 1) attaches no spatial extent (h=w=0). views: camera slots per timestep, each
+    holding its own grid; with more than one, a `view` axis carries the slot index.
+    Tokens are ordered time-major, then view, then row, then column.
 
     No `seq` axis: it indexes the whole concatenated sequence, so only the caller that
     concatenates the streams can assign it.
@@ -48,11 +50,15 @@ def make_pos_ids(times, grid=(1, 1)):
     t = torch.as_tensor(times, dtype=torch.float32)
     ids = torch.meshgrid(
         t,
+        torch.arange(views, dtype=torch.float32, device=t.device),
         torch.arange(h, dtype=torch.float32, device=t.device),
         torch.arange(w, dtype=torch.float32, device=t.device),
         indexing="ij",
     )
-    return dict(zip(POS_AXES, (i.flatten() for i in ids)))
+    out = dict(zip(("time", "view", "height", "width"), (i.flatten() for i in ids)))
+    if views == 1:
+        del out["view"]
+    return out
 
 
 def fit_ladder(ids):

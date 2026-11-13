@@ -11,6 +11,15 @@ rates (video tubelets vs. action steps), time alignment falls out of the compari
 there is no index arithmetic tying streams together. New modalities just declare their
 step indices; an always-visible conditioning token can pass start=-inf.
 
+An optional local `window` (seconds) adds a second predicate,
+
+    kv_block_end > q_block_end - window
+
+so a query sees only the keys whose block ends within the last `window` seconds of its
+own: with one step per block at `fps`, `window = W / fps` keeps the current step and the
+W - 1 before it (V-JEPA 2-AC / RoboJEPA's 8-step band). A rollout longer than the window
+then never shows a query more history than training did.
+
 Intervals are built from the modality spec's integer step indices, and boundaries are
 computed as (integer step count) / fps in float64. IEEE division is correctly rounded,
 so boundaries that are equal in exact arithmetic are bit-identical across modalities
@@ -21,6 +30,10 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
 __all__ = ["block_intervals", "block_causal_mask", "block_causal_flex_mask"]
+
+# the window edge lands exactly on a block boundary, and `q_end - window` is a subtraction
+# that need not round to the boundary's float; a microsecond is far below any step length
+_WINDOW_EPS = 1e-6
 
 
 def block_intervals(indices, fps, block_size=1):
@@ -40,8 +53,12 @@ def block_intervals(indices, fps, block_size=1):
     return start, end
 
 
-def block_causal_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids=None, vis=None):
+def block_causal_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids=None, vis=None,
+                      window=None):
     """Dense (N, N) bool mask for SDPA, True = attend. Rows are queries.
+
+    window (seconds, or None) restricts each query to keys whose block ends after
+    `q_end - window` (see the module docstring).
 
     blocked_q/noisy_kv (both (N,) bool or both None) add a role rule on top of the
     time predicate: a blocked_q query never attends a noisy_kv key, whatever their
@@ -50,6 +67,8 @@ def block_causal_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids=None
     vis[stream_ids[q], stream_ids[k]].
     """
     mask = start[None, :] < end[:, None]
+    if window is not None:
+        mask &= end[None, :] > end[:, None] - float(window) + _WINDOW_EPS
     if blocked_q is not None:
         mask &= ~(blocked_q[:, None] & noisy_kv[None, :])
     if vis is not None:
@@ -58,7 +77,7 @@ def block_causal_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids=None
 
 
 def block_causal_flex_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids=None,
-                           vis=None, flex_block_size=128):
+                           vis=None, flex_block_size=128, window=None):
     """The same predicate as a flex-attention BlockMask.
 
     flex_block_size is the kernel's sparsity granularity, it does not change mask
@@ -66,6 +85,8 @@ def block_causal_flex_mask(start, end, blocked_q=None, noisy_kv=None, stream_ids
     """
     def mask_fn(b, h, q_idx, kv_idx):
         ok = start[kv_idx] < end[q_idx]
+        if window is not None:
+            ok = ok & (end[kv_idx] > end[q_idx] - float(window) + _WINDOW_EPS)
         if blocked_q is not None:
             ok = ok & ~(blocked_q[q_idx] & noisy_kv[kv_idx])
         if vis is not None:

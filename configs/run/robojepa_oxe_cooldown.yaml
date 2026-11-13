@@ -1,0 +1,25 @@
+# @package _global_
+# RoboJEPA's cooldown (their App. C.2), run as they do: a fresh job from the stable phase's
+# checkpoint with the LR decayed linearly to 0 over 5000 steps and the autoregressive
+# rollout raised from 2 to 10 steps:
+#
+#   python main.py run=robojepa_oxe_cooldown experiment.init_from=<stable run checkpoint .pt>
+#
+# init_from brings the weights, not the optimizer state, which their resume keeps.
+defaults:
+  - robojepa_oxe
+  - _self_
+
+experiment:
+  init_from: ???
+  max_steps: 5000
+  lr_warmup_steps: 0
+  lr_schedule: linear
+  eval_every: 1000
+  save_every: 1000
+
+algorithm:
+  losses:
+    - {type: prediction, stream: frames_next, weight: 0.5, norm: l1, reduce: step}
+    - {type: rollout, stream: frames_next, steps: 10, prefix: random, weight: 0.5, label: rollout}
+    - {type: rollout, stream: frames_next, steps: 10, prefix: all, weight: 0.0, label: rollout10}

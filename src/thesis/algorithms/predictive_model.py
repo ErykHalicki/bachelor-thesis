@@ -6,6 +6,7 @@ window out of its raw batch field, routes conditioning streams by `via`, and run
 The batch contract is documented in docs/.claude/config-spec.md.
 """
 
+import fnmatch
 import os
 
 import torch
@@ -137,6 +138,11 @@ class PredictiveModel(BaseAlgorithm):
                 raw_per_step = 1
                 grid = spec.get("grid", (1, 1))
                 span = grid[0] * grid[1]
+                if int(spec.get("views", 1)) > 1:
+                    raise ValueError(
+                        f"stream '{name}' has views but no encoder: a multi-view field is "
+                        f"(B, T, V, ...) and only an encoder turns it into tokens"
+                    )
             self._raw_per_step[name] = raw_per_step
             steps = len(parse_index(spec["index"]))
             raw = parse_index(raw_index(spec))
@@ -223,6 +229,13 @@ class PredictiveModel(BaseAlgorithm):
             if "index" in spec
         }
         # seconds, so streams at different rates land on identical floats for one moment
+        tokens_per_step = {
+            name: int(spec.get("views", 1)) * int(tuple(spec.get("grid", (1, 1)))[0])
+            * int(tuple(spec.get("grid", (1, 1)))[1])
+            for name, spec in {**dict(cfg.conditioning), **dict(cfg.predict)}.items()
+            if "index" in spec
+        }
+        self._tokens_per_step = tokens_per_step
         stream_times = {
             name: tuple(
                 LAST if isinstance(i, str) else i / float(spec.get("fps", 1.0))
@@ -233,9 +246,19 @@ class PredictiveModel(BaseAlgorithm):
         }
         self.loss_terms = nn.ModuleList(
             [build_loss_term(term, default_streams, stream_dims, stream_frames, stream_times,
-                             modules=self.encoders)
+                             modules=self.encoders, tokens_per_step=tokens_per_step)
              for term in loss_cfg]
         )
+        self._rollout_terms = [
+            (term, float(t.get("weight", 1.0)) != 0.0)
+            for term, t in zip(self.loss_terms, loss_cfg) if t.get("type") == "rollout"
+        ]
+        for term, _ in self._rollout_terms:
+            if cfg.predict.get(term.stream, {}).get("type") != "direct":
+                raise ValueError(f"rollout term names '{term.stream}', not a direct stream")
+        # weight decay on every >= 2-D trainable tensor but those matching `no_decay`
+        # (fnmatch over parameter names); 1-D tensors (biases, norms) never decay
+        self.optim_groups = dict(cfg.get("optim_groups") or {})
         # `weight: 0.0` declares a MONITORING term: evals report it, training never
         # pays for it -- loss() skips these in train mode and their artifacts (an
         # observed `integration` costs num_steps extra trunk passes) are not built
@@ -298,7 +321,8 @@ class PredictiveModel(BaseAlgorithm):
                 continue
             grid = tuple(spec.get("grid", (1, 1)))
             self._stream_axes[name] = (
-                len(parse_index(spec["index"])), int(grid[0]) * int(grid[1])
+                len(parse_index(spec["index"])),
+                int(spec.get("views", 1)) * int(grid[0]) * int(grid[1]),
             )
 
         self.predictor = self._build_predictor(cfg)
@@ -321,22 +345,45 @@ class PredictiveModel(BaseAlgorithm):
         """The predictor the loss layer runs against."""
         return self.predictor
 
-    def run_encoder(self, name, x):
+    def run_encoder(self, name, x, batch=None):
         """Run x through encoder `name`, first through the upstream chain its `input`
         links declare. A frozen stage runs under no_grad unless a trainable stage
-        upstream needs gradients through it.
+        upstream needs gradients through it. A stage listing `meta_fields` (e.g. the
+        embodiment id a per-embodiment projection selects its weights by) reads them
+        from `batch` as keyword arguments.
         """
-        return self._run_stages(self._encoder_chains[name], x)
+        return self._run_stages(self._encoder_chains[name], x, batch)
 
-    def _run_stages(self, stages, x):
+    def _run_stages(self, stages, x, batch=None):
         for stage in stages:
             encoder = self.encoders[stage]
+            fields = getattr(encoder, "meta_fields", ())
+            if fields and batch is None:
+                raise ValueError(f"encoder '{stage}' needs batch fields {list(fields)}")
+            kwargs = {f: batch[f] for f in fields}
             if encoder.frozen and not (torch.is_tensor(x) and x.requires_grad):
                 with torch.no_grad():
-                    x = encoder(x)
+                    x = encoder(x, **kwargs)
             else:
-                x = encoder(x)
+                x = encoder(x, **kwargs)
         return x
+
+    def optim_params(self):
+        """Two AdamW groups when `optim_groups.no_decay` is set: decayed >= 2-D tensors,
+        and everything else (1-D tensors and the named patterns) at weight_decay 0.
+        Frozen parameters are left out."""
+        if not self.optim_groups:
+            return self.parameters()
+        patterns = list(self.optim_groups.get("no_decay") or [])
+        decay, keep = [], []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim < 2 or any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                keep.append(param)
+            else:
+                decay.append(param)
+        return [{"params": decay}, {"params": keep, "weight_decay": 0.0}]
 
     def cacheable_streams(self):
         """The spec entries whose frozen-root encoder output can be precomputed, as
@@ -416,7 +463,122 @@ class PredictiveModel(BaseAlgorithm):
                 )
         raw = self._raw(name, spec, batch)
         enc = spec.get("encoder")
-        return self.run_encoder(enc, raw) if enc else raw
+        if not enc:
+            return raw
+        if int(spec.get("views", 1)) > 1:
+            return self._encode_views(name, spec, enc, raw, batch)
+        return self.run_encoder(enc, raw, batch)
+
+    def _encode_views(self, name, spec, enc, raw, batch):
+        """A (B, T, V, ...) multi-camera window -> (B, T * V * k, dim) tokens, time-major
+        then view. A token the batch marks invalid (`valid.steps` / `valid.views`) is never
+        encoded and comes out as zeros.
+
+        With a frame-local chain (every stage's `frame_local`) the field's real frames are
+        encoded once as single-frame clips and the stream slices its rows out of that, so a
+        context window and its shift-by-one target share one encoder pass. Otherwise each
+        present camera is encoded as its own (T, ...) clip, padded steps included."""
+        views = int(spec["views"])
+        if raw.shape[2] != views:
+            raise ValueError(f"stream '{name}' declares {views} views, field has {raw.shape[2]}")
+        fields = spec_fields(name, spec)
+        block = spec.get("valid") or {}
+        if (len(fields) == 1 and self._raw_per_step.get(name, 1) == 1
+                and self._frame_local(enc)):
+            full = self._frame_encoded(fields[0], enc, views, block, batch)
+            sel = self._selectors[name]
+            out = full if sel is None else full[:, sel]
+            if out.shape[1] != raw.shape[1]:
+                raise ValueError(f"stream '{name}': {raw.shape[1]} rows, sliced {out.shape[1]}")
+            return out.reshape(out.shape[0], -1, out.shape[-1])
+        B, T = raw.shape[:2]
+        clips = raw.transpose(1, 2)                                  # (B, V, T, ...)
+        field = block.get("views")
+        keep = batch[field].bool() if field else torch.ones(B, views, dtype=torch.bool,
+                                                            device=raw.device)
+        z = self.run_encoder(enc, clips[keep], batch=self._rows(batch, keep))
+        k = z.shape[1] // T
+        out = z.new_zeros(B, views, T, k, z.shape[-1])
+        out[keep] = z.view(-1, T, k, z.shape[-1])
+        return out.transpose(1, 2).reshape(B, T * views * k, z.shape[-1])
+
+    def _frame_local(self, enc):
+        return all(getattr(self.encoders[s], "frame_local", False)
+                   for s in self._encoder_chains[enc])
+
+    def _frame_encoded(self, field, enc, views, block, batch):
+        """(B, R, V, k, dim) latents of every row of a (B, R, V, ...) camera field, from one
+        encoder pass over its real frames only (valid step AND valid camera slot), zeros
+        elsewhere. Memoized per (field, encoder) while a loss context is being built, so
+        every stream reading the field reuses the pass."""
+        memo = getattr(self, "_frame_memo", None)
+        if memo is not None and (field, enc) in memo:
+            return memo[(field, enc)]
+        x = batch[field]
+        B, R = x.shape[:2]
+        keep = torch.ones(B, R, views, dtype=torch.bool, device=x.device)
+        if block.get("steps"):
+            steps = batch[block["steps"]].bool()
+            if steps.shape[1] != R:
+                raise ValueError(f"'{block['steps']}' has {steps.shape[1]} rows, '{field}' {R}")
+            keep &= steps[:, :, None]
+        if block.get("views"):
+            keep &= batch[block["views"]].bool()[:, None, :]
+        rows = {k: v[:, None, None].expand(B, R, views)[keep] for k, v in batch.items()
+                if torch.is_tensor(v) and v.ndim == 1 and v.shape[0] == B}
+        z = self.run_encoder(enc, x[keep].unsqueeze(1), batch=rows)   # (M, k, dim)
+        out = z.new_zeros(B, R, views, *z.shape[1:])
+        out[keep] = z
+        if memo is not None:
+            memo[(field, enc)] = out
+        return out
+
+    @staticmethod
+    def _rows(batch, keep):
+        """The batch fields a per-view encoder pass may read, repeated per kept view."""
+        B, V = keep.shape
+        return {k: v.unsqueeze(1).expand(B, V, *v.shape[1:])[keep]
+                for k, v in batch.items() if torch.is_tensor(v) and v.ndim >= 1
+                and v.shape[0] == B and v.ndim <= 2}
+
+    def _token_valid(self, name, spec, batch):
+        """(B, N) bool validity of a stream's tokens from its `valid:` block, or None.
+
+        `valid.steps` names a (B, rows) bool field laid out like the stream's own field
+        (same rows, so the stream's selector slices it), `valid.views` a (B, views) bool
+        field. A token is valid when its step and its camera slot both are.
+        """
+        block = spec.get("valid")
+        if not block or "index" not in spec:
+            return None
+        steps = len(parse_index(spec["index"]))
+        views = int(spec.get("views", 1))
+        grid = tuple(spec.get("grid", (1, 1)))
+        span = int(grid[0]) * int(grid[1])
+        ref = next(v for v in batch.values() if torch.is_tensor(v))
+        B = ref.shape[0]
+        mask = torch.ones(B, steps, views, dtype=torch.bool, device=ref.device)
+        if block.get("steps"):
+            rows = batch[block["steps"]].bool()
+            sel = self._selectors[name]
+            if sel is not None:
+                rows = rows[:, sel] if self._raw_per_step.get(name, 1) == 1 else \
+                    rows[:, sel][:, ::self._raw_per_step[name]]
+            mask &= rows[:, :steps, None]
+        if block.get("views"):
+            mask &= batch[block["views"]].bool()[:, None, :]
+        return mask[..., None].expand(-1, -1, -1, span).reshape(B, -1)
+
+    def _trunk_inputs(self, batch):
+        """The identity fields and per-stream key validity the trunk reads, from `batch`."""
+        meta = {f: batch[f] for f in getattr(self.predictor, "meta_fields", ())}
+        valid = {}
+        for name, spec in self.conditioning.items():
+            if spec.get("via", "tokens") == "tokens":
+                v = self._token_valid(name, spec, batch)
+                if v is not None:
+                    valid[name] = v
+        return meta, valid
 
     def _condition(self, batch, token_streams=None):
         """Encode every conditioning stream once, routing it by `via`.
@@ -487,7 +649,7 @@ class PredictiveModel(BaseAlgorithm):
             if raw_std:
                 raw = raw + raw_std * torch.randn_like(raw)
             enc = src.get("encoder")
-            z = self.run_encoder(enc, raw) if enc else raw
+            z = self.run_encoder(enc, raw, batch) if enc else raw
 
         fill, m = src.get("fill", "repeat_last"), z.shape[1]
         if m != n_tokens:
@@ -522,7 +684,20 @@ class PredictiveModel(BaseAlgorithm):
         """
         raise NotImplementedError
 
+    def _forward_rollout(self, stream, steps, prefix, clean, sources, cond, targets, pred,
+                         meta, valid, target_valid):
+        """A `rollout` term's autoregressive passes: a list (one per prefix) of per-step
+        (pred, target, valid) triples. See `losses.RolloutLoss`."""
+        raise NotImplementedError
+
     def _build_context(self, batch):
+        self._frame_memo = {}
+        try:
+            return self._build_context_inner(batch)
+        finally:
+            self._frame_memo = None
+
+    def _build_context_inner(self, batch):
         """Assemble the artifacts the loss terms read: per-stream encoder `latent`, predictor
         `pred`, and the regression `target` (plus the `raw` windows for the terms scoring in
         raw space, and the `integrated` ODE endpoint when an integration term asks for it).
@@ -533,8 +708,28 @@ class PredictiveModel(BaseAlgorithm):
         targets = {name: self._encode(name, spec, batch) for name, spec in self.predict_spec.items()}
         latent.update(targets)
         seeds = self.build_flow_seeds(batch, {**clean, **sources, **cond, **hidden}, training=True)
-        pred, target = self._forward_train(clean, sources, cond, targets, seeds=seeds)
+        meta, valid = self._trunk_inputs(batch)
+        extra = {"meta": meta, "valid": valid} if (meta or valid) else {}
+        pred, target = self._forward_train(clean, sources, cond, targets, seeds=seeds, **extra)
         ctx = {"latent": latent, "pred": pred, "target": target}
+        target_valid = {}
+        for name, spec in self.predict_spec.items():
+            v = self._token_valid(name, spec, batch)
+            if v is not None:
+                target_valid[name] = v
+        if target_valid:
+            ctx["valid"] = target_valid
+        if valid or target_valid:
+            # every stream's token validity, for the terms scoring encoder latents (sigreg)
+            ctx["latent_valid"] = {**valid, **target_valid}
+        wanted = [term for term, scored in self._rollout_terms if scored or not self.training]
+        if wanted:
+            ctx["rollout"] = {
+                term.label: self._forward_rollout(
+                    term.stream, term.steps, term.prefix, clean, sources, cond, targets,
+                    pred, meta, valid, target_valid.get(term.stream))
+                for term in wanted
+            }
         # observed (`weight: 0.0`) terms run in eval only, so in train mode build only what
         # the scored terms read -- see the `scored` note where the terms are built
         raw_streams = (self._raw_loss_streams_scored if self.training
@@ -579,7 +774,7 @@ class PredictiveModel(BaseAlgorithm):
             return (hi - lo).clamp_min(1e-8) / 2
         return torch.as_tensor(entry["std"], dtype=torch.float32).clamp_min(1e-8)
 
-    def _variance_logs(self, latent):
+    def _variance_logs(self, latent, valid=None):
         """Share of variance carried along the time and grid axes, per stream FAMILY.
 
         Streams reading the same source field with matching grid span and latent width --
@@ -591,8 +786,10 @@ class PredictiveModel(BaseAlgorithm):
         partner keeps its own name, exactly as before.
 
         Each value is the variance along that axis over the family's total: 1.0 is what
-        independent tokens give, 0 means constant along the axis, i.e. collapsed.
+        independent tokens give, 0 means constant along the axis, i.e. collapsed. Tokens
+        `valid` marks invalid (padded steps, empty camera slots) are left out of both.
         """
+        valid = valid or {}
         streams = {**dict(self.conditioning), **dict(self.predict_spec)}
         groups = {}
         for name, (steps, span) in self._stream_axes.items():
@@ -600,21 +797,40 @@ class PredictiveModel(BaseAlgorithm):
             if z is None or z.ndim != 3 or z.shape[1] != steps * span:
                 continue
             z = z.detach().float().unflatten(1, (steps, span))
+            m = valid.get(name)
+            m = (torch.ones(z.shape[:3], dtype=torch.bool, device=z.device) if m is None
+                 else m.bool().view(z.shape[:3]))
             spec = streams.get(name)
             field = spec.get("from", name) if spec is not None else name
-            groups.setdefault((field, span, z.shape[-1]), []).append((name, z))
+            groups.setdefault((field, span, z.shape[-1]), []).append((name, z, m))
         logs = {}
         for (field, span, _), members in groups.items():
-            names = [n for n, _ in members]
-            z = torch.cat([m for _, m in members], dim=1)
+            names = [n for n, _, _ in members]
+            z = torch.cat([g for _, g, _ in members], dim=1)
+            m = torch.cat([g for _, _, g in members], dim=1)
             label = (names[0] if len(names) == 1
                      else os.path.commonprefix(names).rstrip("_") or field)
-            total = z.reshape(-1, z.shape[-1]).var(dim=0).mean().clamp_min(1e-12)
-            if z.shape[1] > 1:
-                logs[f"var/{label}/temporal"] = z.var(dim=1).mean() / total
-            if span > 1:
-                logs[f"var/{label}/spatial"] = z.var(dim=2).mean() / total
+            real = z[m]
+            if real.shape[0] < 2:
+                continue
+            total = real.var(dim=0).mean().clamp_min(1e-12)
+            for axis, dim in (("temporal", 1), ("spatial", 2)):
+                v = self._masked_var(z, m, dim) if z.shape[dim] > 1 else None
+                if v is not None:
+                    logs[f"var/{label}/{axis}"] = v / total
         return logs
+
+    @staticmethod
+    def _masked_var(z, m, dim):
+        """Unbiased variance of (B, T, S, D) `z` along `dim` over the tokens `m` keeps,
+        averaged over the slices holding at least two of them and over D; None when no
+        slice does (a batch of single-camera clips has no spatial spread to measure)."""
+        w = m.unsqueeze(-1).to(z.dtype)
+        n = w.sum(dim, keepdim=True)
+        mu = (z * w).sum(dim, keepdim=True) / n.clamp_min(1)
+        var = ((z - mu).square() * w).sum(dim, keepdim=True) / (n - 1).clamp_min(1)
+        ok = (n > 1).expand_as(var)
+        return var[ok].mean() if ok.any() else None
 
     def loss(self, batch):
         ctx = self._build_context(batch)
@@ -627,7 +843,10 @@ class PredictiveModel(BaseAlgorithm):
             val = term(ctx)
             total = total + term.weight * val
             logs[f"loss/{term.label}"] = val.detach()
-        return {"loss": total, **logs, **self._variance_logs(ctx["latent"])}
+            for key, value in getattr(term, "step_logs", {}).items():
+                logs[f"loss/{term.label}/{key}"] = value
+        var = self._variance_logs(ctx["latent"], ctx.get("latent_valid"))
+        return {"loss": total, **logs, **var}
 
     def summary(self):
         return {**super().summary(), "obs_len": self.obs_len}

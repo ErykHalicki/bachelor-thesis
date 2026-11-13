@@ -1,0 +1,29 @@
+# RoboJEPA's stable phase (their Table 10 / wm_22m.yaml): AdamW betas (0.9, 0.95), weight
+# decay 0.1, global grad clip 1.0, linear warmup over 2000 steps to a flat 5e-5. The
+# cooldown is its own job (run/robojepa_oxe_cooldown). One AdamW group at their 5e-5
+# trains the predictor and the unfrozen encoder alike. Their batch is 512 clips on 128
+# GPUs; here micro-batches sized to the V100 accumulate to 32.
+defaults:
+  - base
+  - _self_
+
+batch_size: auto
+effective_batch: 32
+gradient_checkpointing: true
+max_steps: 30000
+mixed_precision: fp16
+grad_clip: 1.0
+lr_warmup_steps: 2000
+lr_schedule: constant
+num_workers: 10
+pin_memory: true
+log_every: 25
+eval_every: 2000
+save_every: 2000
+
+optimizer:
+  name: adamw
+  lr: 5.0e-5
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1

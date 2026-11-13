@@ -1,0 +1,156 @@
+# RoboJEPA's world model (Zholus et al. 2026, arXiv 2610.10515; facebookresearch/robo_jepa,
+# configs/scaling/wm_22m.yaml) at its 22M scale, with the encoder changed: LeVJEPA ViT-L,
+# TRAINED end to end, read through its [cls] token (one 1024-d token per view per step)
+# instead of a frozen V-JEPA 2.1-G's 15x20 patch grid. Everything else follows their code:
+#
+#   tokens    per step: each view's layer-normed latent (Linear 1024 -> 512), one action
+#             token and one proprio token (per-embodiment linear, 64-d padded input)
+#   identity  zero-init embodiment and per-view (semantic camera) vectors on the visual
+#             tokens; a zero-init per-layer view bias on their queries and keys after RoPE
+#   trunk     7 pre-norm blocks, width 512, 4 heads of 128, RMSNorm, RMSNorm QK-norm, GELU
+#             MLP x4, final RMSNorm, trunc-normal(0.02) init with 1/sqrt(2i) rescaling
+#   RoPE      4 axes (time, height, width, view) x 32 dims, their per-step frequency ladder
+#             10000^(-m/16); height/width never rotate for a [cls] token, as in theirs
+#   mask      step-causal, all tokens of a step see each other, 8-step local window
+#   head      Linear 512 -> 1024 then a parameter-free LayerNorm (targets are LN'd too)
+#   loss      0.5 x teacher-forced L1 + 0.5 x 2-step autoregressive L1 (random prefix,
+#             detached feedback, RoboJEPA's 1/K weighting), per-step averaged
+#
+# Their objective has no anti-collapse term: with a frozen encoder it needs none. Trained
+# here, the encoder could shrink every frame to one latent the predictor copies, so one
+# addition: LeWM's SIGReg, per timestep, on a fork of the layer-normed latents through
+# LeWM's projector (Linear -> BatchNorm -> GELU -> Linear). The projector feeds only
+# SIGReg; the predictor's inputs and targets stay the layer-normed [cls]:
+#
+#   ViT -> layernorm -> predictor (inputs and targets)
+#                    \-> Linear -> BatchNorm -> GELU -> Linear -> SIGReg
+#
+# Padded frames and empty camera slots are never encoded, so they reach neither the
+# BatchNorm nor SIGReg. Watch var/frames/temporal (1.0 = independent frames, 0 =
+# collapsed); targets are not stop-gradded, as in the repo's other end-to-end models.
+#
+# Positions are seconds in this repo, so the time ladder is theirs divided by the 5 Hz rate.
+# RoPE itself is a true rotation here; theirs (inherited from V-JEPA 2) pairs adjacent
+# channels with frequencies laid out half-split, which rotates a pair's two channels by
+# different angles -- reproduced in spirit (same frequencies, same axes), not bit for bit.
+
+name: generic_vit_predictor
+
+wm_fps: 5
+pad_size: 64
+num_embodiments: 32      # table size; the mixture's embodiment ids must stay below it
+vision_dim: 1024
+model_dim: 512
+
+encoders:
+  levjepa:
+    type: levjepa
+    arch: vit_large
+    checkpoint: pretrained
+    crop_size: [240, 320]  # RoboJEPA's training resolution
+    pooling: cls
+    per_frame: true
+    frozen: false
+    repeat: 1              # one image per clip, as V-JEPA 2.1 encodes a frame there
+    attn_mode: full        # a single-frame clip has nothing to be causal over
+  vision:                  # encoder_layernorm: inputs and targets alike
+    type: layernorm
+    input: levjepa
+  action_proj:
+    type: embodiment_linear
+    in_dim: ${algorithm.pad_size}
+    out_dim: ${algorithm.model_dim}
+    num: ${algorithm.num_embodiments}
+    field: embodiment_id
+  state_proj:
+    type: embodiment_linear
+    in_dim: ${algorithm.pad_size}
+    out_dim: ${algorithm.model_dim}
+    num: ${algorithm.num_embodiments}
+    field: embodiment_id
+
+# 16-frame clips: inputs are frames 0..14 (offsets -14..0) with their actions and states,
+# targets frames 1..15 (-13..1), each input position predicting the next frame
+conditioning:
+  frames:
+    from: observation.images
+    encoder: vision
+    dim: ${algorithm.vision_dim}
+    views: 2
+    index: "-14..0"
+    fps: ${algorithm.wm_fps}
+    token_in: {type: linear}
+    valid: {steps: step_valid, views: view_valid}
+  action:
+    from: action
+    role: action
+    encoder: action_proj
+    dim: ${algorithm.model_dim}
+    index: "-14..0"
+    fps: ${algorithm.wm_fps}
+    token_in: {type: identity}
+  state:
+    from: observation.state
+    encoder: state_proj
+    dim: ${algorithm.model_dim}
+    index: "-14..0"
+    fps: ${algorithm.wm_fps}
+    token_in: {type: identity}
+
+predict:
+  frames_next:
+    type: direct
+    input: frames
+    from: observation.images
+    encoder: vision
+    dim: ${algorithm.vision_dim}
+    views: 2
+    index: "-13..1"
+    fps: ${algorithm.wm_fps}
+    token_out: {type: linear, norm: layernorm}
+    valid: {steps: step_valid, views: view_valid}
+
+model:
+  model_dim: ${algorithm.model_dim}
+  depth: 7
+  num_heads: 4
+  mlp_ratio: 4.0
+  dropout: 0.0
+  attn_backend: sdpa
+  block: prenorm
+  norm: rmsnorm
+  qk_norm: rmsnorm
+  final_norm: rmsnorm
+  init: robojepa
+  causal: true
+  attention_window: 1.6    # 8 steps at 5 Hz
+  embodiment: {field: embodiment_id, num: "${algorithm.num_embodiments}", streams: [frames]}
+  camera:
+    field: view_id
+    num: 7                 # RoboJEPA's semantic cameras (datasets/mixture/embodiment.py)
+    streams: [frames]
+    input_embedding: true
+    attention_bias: true
+  rope:
+    time:   {share: 0.25, min_period: 1.2566370614359172, max_period: 7066.589504111798}
+    height: {share: 0.25, min_period: 6.283185307179586, max_period: 35332.94752055899}
+    width:  {share: 0.25, min_period: 6.283185307179586, max_period: 35332.94752055899}
+    view:   {share: 0.25, min_period: 6.283185307179586, max_period: 35332.94752055899}
+
+# AdamW decays every >= 2-D trainable tensor except these (their no-decay list); 1-D
+# tensors never decay
+optim_groups:
+  no_decay:
+    - "predictor.blocks.*.view_bias.weight"
+    - "encoders.action_proj.*"
+    - "encoders.state_proj.*"
+
+losses:
+  - {type: prediction, stream: frames_next, weight: 0.5, norm: l1, reduce: step}
+  - {type: rollout, stream: frames_next, steps: 2, prefix: random, weight: 0.5, label: rollout}
+  # LeWM: one bag per frame position (each distinct frame of the two windows once), the
+  # projector square at the latent width, lambda 0.09
+  - {type: sigreg, streams: [frames, frames_next], concat: temporal, statistic: per_timestep,
+     head: mlp, proj_hidden: 2048, weight: 0.09}
+  # observed only: RoboJEPA's forward-prediction eval, 10 rollout steps over every prefix
+  - {type: rollout, stream: frames_next, steps: 10, prefix: all, weight: 0.0, label: rollout10}

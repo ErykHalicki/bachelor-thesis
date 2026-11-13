@@ -1,5 +1,6 @@
-"""DiT transformer block: self-attention -> optional cross-attention -> MLP; and its
-Mixture-of-Transformers form, MoTBlock, with per-expert parameters under one attention."""
+"""DiT transformer block: self-attention -> optional cross-attention -> MLP; its
+Mixture-of-Transformers form, MoTBlock, with per-expert parameters under one attention;
+and PreNormBlock, a plain unmodulated ViT block for trunks with no AdaLN conditioning."""
 
 import torch.nn as nn
 
@@ -7,7 +8,7 @@ from .attention import CrossAttention, SelfAttention, attend, merge_heads
 from .layers import bcast_cond, make_mlp, modulate
 from .rope import apply_rotary_emb
 
-__all__ = ["DiTBlock", "MoTBlock"]
+__all__ = ["DiTBlock", "MoTBlock", "PreNormBlock"]
 
 
 class DiTBlock(nn.Module):
@@ -21,10 +22,10 @@ class DiTBlock(nn.Module):
     """
 
     def __init__(self, hidden_size, num_heads, source_dims=None, mlp_ratio=4.0, dropout=0.0,
-                 cond_dim=None, dim_head=None, mlp_dim=None):
+                 cond_dim=None, dim_head=None, mlp_dim=None, qk_norm="layernorm"):
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.sa = SelfAttention(hidden_size, num_heads, dim_head=dim_head)
+        self.sa = SelfAttention(hidden_size, num_heads, dim_head=dim_head, qk_norm=qk_norm)
 
         self.ca = CrossAttention(hidden_size, num_heads, source_dims) if source_dims else None
         self.norm_ca = nn.RMSNorm(hidden_size, eps=1e-6) if source_dims else None
@@ -199,4 +200,54 @@ class MoTBlock(nn.Module):
 
         h = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp * self.drop(self._route(self.mlp, h, routes))
+        return x
+
+
+class PreNormBlock(nn.Module):
+    """A standard pre-norm ViT block: x + attn(norm(x)), then x + mlp(norm(x)).
+
+    No AdaLN, no gates, no cross-attention: the block of V-JEPA 2-AC and RoboJEPA's
+    predictor (`model.block: prenorm`). Norms are affine RMSNorm (or LayerNorm), QK-norm
+    is per head, the MLP is Linear -> GELU -> Linear at `mlp_ratio`.
+
+    `view_bias` (number of semantic camera ids, or None) gives the block RoboJEPA's
+    "strong view conditioning": a zero-initialised (num_views, head_dim) table whose row
+    for a token's camera is added to its queries and keys after RoPE. The trunk passes
+    each token's camera id, -1 for tokens with no camera (actions, state), whose rows
+    stay zero.
+    """
+
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, dropout=0.0, dim_head=None,
+                 mlp_dim=None, norm="rmsnorm", qk_norm="rmsnorm", view_bias=None):
+        super().__init__()
+        make_norm = {"rmsnorm": lambda d: nn.RMSNorm(d, eps=1e-6),
+                     "layernorm": lambda d: nn.LayerNorm(d, eps=1e-6)}.get(norm)
+        if make_norm is None:
+            raise ValueError(f"unknown norm '{norm}'; use 'rmsnorm' or 'layernorm'")
+        self.norm1 = make_norm(hidden_size)
+        self.sa = SelfAttention(hidden_size, num_heads, dim_head=dim_head, qk_norm=qk_norm)
+        self.norm2 = make_norm(hidden_size)
+        hidden = int(mlp_dim or hidden_size * mlp_ratio)
+        self.mlp = nn.Sequential(nn.Linear(hidden_size, hidden), nn.GELU(),
+                                 nn.Linear(hidden, hidden_size))
+        self.drop = nn.Dropout(dropout)
+        self.head_dim = dim_head if dim_head is not None else hidden_size // num_heads
+        self.view_bias = None
+        if view_bias:
+            self.view_bias = nn.Embedding(int(view_bias), self.head_dim)
+            nn.init.zeros_(self.view_bias.weight)
+
+    def clear_cache(self):
+        pass
+
+    def forward(self, x, cond=None, sources=None, source_masks=None, freqs=None,
+                attn_mask=None, use_kv_cache=False, view_ids=None):
+        """The DiTBlock signature, so the trunk calls either the same way; `cond`,
+        `sources` and the KV cache do not apply here. view_ids: (B, N) long, -1 = none."""
+        bias = None
+        if self.view_bias is not None and view_ids is not None:
+            bias = self.view_bias(view_ids.clamp(min=0)) * (view_ids >= 0).unsqueeze(-1)
+        x = x + self.drop(self.sa(self.norm1(x), freqs=freqs, attn_mask=attn_mask,
+                                  qk_bias=bias))
+        x = x + self.drop(self.mlp(self.norm2(x)))
         return x

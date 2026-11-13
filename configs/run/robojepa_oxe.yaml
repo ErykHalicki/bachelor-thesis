@@ -1,0 +1,21 @@
+# @package _global_
+# RoboJEPA's 22M world model on the eight-embodiment Open-X mixture, LeVJEPA ViT-L [cls]
+# tokens in place of V-JEPA 2.1-G patches (configs/algorithm/robojepa_levjepa_cls.yaml):
+#
+#   python main.py run=robojepa_oxe
+#
+# Held-out score: RoboJEPA's 10-step rollout L1 over every prefix (loss/rollout10, per step
+# under loss/rollout10/step<k>), next to the teacher-forced L1 (loss/frames_next).
+defaults:
+  - override /dataset: oxe_mixture
+  - override /algorithm: robojepa_levjepa_cls
+  - override /eval: holdout
+  - override /experiment: robojepa
+
+best_metric: loss/rollout10
+best_mode: min
+
+eval:
+  batch_size: 32
+  max_batches: null
+  num_workers: 8

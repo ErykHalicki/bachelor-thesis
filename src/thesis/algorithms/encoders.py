@@ -19,6 +19,7 @@ encoded stream consumes (2 frames per VJEPA2 tubelet), so the algorithm can
 slice each spec entry's window out of a shared raw field before encoding.
 """
 
+import functools
 import sys
 from pathlib import Path
 
@@ -39,6 +40,8 @@ __all__ = [
     "ResNetEncoder",
     "AttentivePoolEncoder",
     "LinearEncoder",
+    "EmbodimentLinearEncoder",
+    "LayerNormEncoder",
     "MLPEncoder",
     "ChunkMLPEncoder",
     "ReshapeEncoder",
@@ -106,11 +109,18 @@ class Encoder(nn.Module):
     which must not turn a cheap non-visual codec (chunk_mlp on actions) into a
     "cacheable" stream -- the cache stores visual windows, and the dataset rejects
     a non-visual cache field.
+
+    `frame_local` marks an encoder whose output for one frame (or token) depends on that
+    frame alone, so a multi-camera window may be encoded as a bag of single frames: the
+    algorithm then encodes each real frame of a field once, skipping padding, and every
+    stream slices its rows out of that (PredictiveModel._frame_encoded). A chain
+    qualifies only when all of its stages do.
     """
 
     raw_steps_per_index = 1
     default_frozen = False
     supports_encoding_cache = False
+    frame_local = False
 
     def __init__(self, spec):
         super().__init__()
@@ -161,6 +171,7 @@ class ViTEncoder(Encoder):
 
     def __init__(self, spec):
         super().__init__(spec)
+        self.frame_local = spec.get("pooling", "grid") == "cls"
         self.center = spec.get("center", True)
         self.pixel_norm = spec.get("pixel_norm")
         assert self.pixel_norm in (None, "imagenet"), f"unknown pixel_norm '{self.pixel_norm}'"
@@ -497,6 +508,7 @@ class LeVJEPAEncoder(Encoder):
         self.pooling = spec.get("pooling", "cls")
         assert self.pooling in ("cls", "grid"), f"unknown pooling '{self.pooling}'"
         self.per_frame = bool(spec.get("per_frame", True))
+        self.frame_local = self.per_frame
         self.repeat = int(spec.get("repeat", 16))
         assert self.repeat >= 1, "repeat must be >= 1"
         if self.pooling == "cls" and not self.per_frame:
@@ -524,6 +536,17 @@ class LeVJEPAEncoder(Encoder):
 
         self.register_buffer("mean", torch.tensor(_IMAGENET_MEAN).view(3, 1, 1))
         self.register_buffer("std", torch.tensor(_IMAGENET_STD).view(3, 1, 1))
+        # recompute each block's activations in the backward pass when the training loop
+        # asks (`experiment.gradient_checkpointing`): an unfrozen ViT-L does not fit otherwise
+        self.gradient_checkpointing = False
+        for block in self.backbone.blocks:
+            block.forward = functools.partial(self._block_forward, block.forward)
+
+    def _block_forward(self, forward, x, **kwargs):
+        if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+            return torch.utils.checkpoint.checkpoint(
+                functools.partial(forward, **kwargs), x, use_reentrant=False)
+        return forward(x, **kwargs)
 
     def _resolve_checkpoint(self, ref, arch):
         ref = str(ref)
@@ -714,6 +737,8 @@ class LinearEncoder(Encoder):
     Spec: `in_dim`, `out_dim`, `bias` (default true).
     """
 
+    frame_local = True
+
     def __init__(self, spec):
         super().__init__(spec)
         self.proj = nn.Linear(int(spec["in_dim"]), int(spec["out_dim"]),
@@ -721,6 +746,52 @@ class LinearEncoder(Encoder):
 
     def forward(self, x):
         return self.proj(x)
+
+
+class EmbodimentLinearEncoder(Encoder):
+    """One linear projection per embodiment: (B, T, in_dim) -> (B, T, out_dim), the weights
+    picked per sample by its embodiment id (RoboJEPA's MultiEmbodimentLinear). Every
+    embodiment's action or state vector is zero-padded to one `in_dim`; its own projection
+    learns which slots carry what, so embodiments share nothing but the output space.
+
+    Spec: `in_dim`, `out_dim`, `num` (table size: embodiment ids must be below it),
+    `field` (the (B,) long batch field holding the id, default `embodiment_id`).
+
+    Init is RoboJEPA's to the letter: kaiming-uniform over their (in_dim, out_dim, num)
+    weight tensor, so the fan-in torch derives is out_dim * num, not in_dim -- weights
+    of about 1/sqrt(out_dim * num), far smaller than an nn.Linear's -- and zero bias.
+    """
+
+    def __init__(self, spec):
+        super().__init__(spec)
+        self.in_dim, self.out_dim = int(spec["in_dim"]), int(spec["out_dim"])
+        self.num = int(spec["num"])
+        self.meta_fields = (str(spec.get("field", "embodiment_id")),)
+        w = torch.empty(self.in_dim, self.out_dim, self.num)
+        nn.init.kaiming_uniform_(w, a=5 ** 0.5)
+        self.weight = nn.Parameter(w.permute(2, 0, 1).contiguous())
+        self.bias = nn.Parameter(torch.zeros(self.num, self.out_dim))
+
+    def forward(self, x, **meta):
+        ids = meta[self.meta_fields[0]].long().view(-1)
+        if int(ids.max()) >= self.num or int(ids.min()) < 0:
+            raise ValueError(f"embodiment id out of range [0, {self.num}): {ids.tolist()}")
+        if x.shape[-1] != self.in_dim:
+            raise ValueError(f"embodiment_linear got {x.shape[-1]}-dim input, in_dim={self.in_dim}")
+        w, b = self.weight[ids], self.bias[ids]
+        return torch.einsum("btd,bde->bte", x.to(w.dtype), w) + b[:, None]
+
+
+class LayerNormEncoder(Encoder):
+    """Parameter-free LayerNorm over the last dim. Chained after a frozen backbone, it is
+    V-JEPA 2-AC / RoboJEPA's `encoder_layernorm`: both the predictor's inputs and its
+    regression targets are layer-normed features. No parameters, so `frozen` means
+    nothing here and gradients pass straight through."""
+
+    frame_local = True
+
+    def forward(self, x):
+        return F.layer_norm(x.float(), (x.shape[-1],)).to(x.dtype)
 
 
 class BatchNormEncoder(Encoder):
@@ -733,6 +804,8 @@ class BatchNormEncoder(Encoder):
     Spec: `dim`, `affine` (default false: a learned per-dim scale could shrink the latent
     all over again), `momentum` (default 0.1), `eps` (default 1e-5).
     """
+
+    frame_local = True
 
     def __init__(self, spec):
         super().__init__(spec)
@@ -768,6 +841,8 @@ class MLPEncoder(Encoder):
     ("batch", "layer", or null -- default null), `activation` ("swiglu" or "gelu" --
     default swiglu). BatchNorm sees the flattened leading dims as the batch.
     """
+
+    frame_local = True
 
     def __init__(self, spec):
         super().__init__(spec)
@@ -949,6 +1024,8 @@ _ENCODER_TYPES = {
     "resnet": ResNetEncoder,
     "attentive_pool": AttentivePoolEncoder,
     "linear": LinearEncoder,
+    "embodiment_linear": EmbodimentLinearEncoder,
+    "layernorm": LayerNormEncoder,
     "batchnorm": BatchNormEncoder,
     "mlp": MLPEncoder,
     "chunk_mlp": ChunkMLPEncoder,

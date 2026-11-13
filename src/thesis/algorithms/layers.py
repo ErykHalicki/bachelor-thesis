@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 __all__ = ["modulate", "bcast_cond", "make_mlp", "TimestepEmbedder", "InputLayer", "FinalLayer",
-           "MLPInputLayer", "MLPFinalLayer"]
+           "MLPInputLayer", "MLPFinalLayer", "LinearHead"]
 
 
 def bcast_cond(v):
@@ -173,3 +173,24 @@ class MLPFinalLayer(nn.Module):
 
     def forward(self, x, cond=None):
         return self.mlp(x)
+
+
+class LinearHead(nn.Module):
+    """One linear projection out of the trunk, optionally followed by a parameter-free
+    `layernorm` over the output: (B, N, hidden_size) -> (B, N, out_dim).
+
+    RoboJEPA's predictor head (`token_out: {type: linear, norm: layernorm}`): its targets
+    are layer-normed encoder features, so the prediction is normalized the same way.
+    """
+
+    def __init__(self, hidden_size, out_dim, norm=None):
+        super().__init__()
+        assert norm in (None, "layernorm"), f"unknown LinearHead norm '{norm}'"
+        self.linear = nn.Linear(hidden_size, out_dim)
+        self.norm = norm
+
+    def forward(self, x, cond=None):
+        x = self.linear(x)
+        if self.norm == "layernorm":
+            x = F.layer_norm(x, (x.shape[-1],))
+        return x

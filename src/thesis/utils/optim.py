@@ -19,10 +19,12 @@ def build_optimizer(params, cfg):
 
 def build_lr_scheduler(optimizer, warmup_steps, total_steps, schedule="cosine"):
     """Linear warmup then cosine decay to 0 — the Diffusion Policy schedule — or, with
-    `schedule="constant"`, warmup then a flat LR (OCBench's Adam at 1e-4)."""
+    `schedule="constant"`, warmup then a flat LR (OCBench's Adam at 1e-4; RoboJEPA's
+    stable phase), or `"linear"`, warmup then a straight line to 0 at `total_steps`
+    (RoboJEPA's cooldown, run as its own job from the stable phase's checkpoint)."""
     import math
 
-    assert schedule in ("cosine", "constant"), f"unknown lr schedule '{schedule}'"
+    assert schedule in ("cosine", "constant", "linear"), f"unknown lr schedule '{schedule}'"
 
     def fn(step):
         if step < warmup_steps:
@@ -30,6 +32,8 @@ def build_lr_scheduler(optimizer, warmup_steps, total_steps, schedule="cosine"):
         if schedule == "constant":
             return 1.0
         p = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        if schedule == "linear":
+            return max(0.0, 1.0 - p)
         return 0.5 * (1 + math.cos(math.pi * min(p, 1.0)))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)

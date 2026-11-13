@@ -461,13 +461,30 @@ def test_token_io_rejects_malformed_blocks(block, message):
 
 def test_token_io_is_rejected_where_there_is_no_projection_to_configure():
     cfg = mixed_cfg()
-    cfg.conditioning.video_context.token_in = {"type": "mlp", "mlp_dim": 8}
+    cfg.conditioning.video_context.token_out = {"type": "mlp", "mlp_dim": 8}
     with pytest.raises(AssertionError, match="conditioning stream"):
         build_algorithm(cfg)
     cfg = mixed_cfg()
     cfg.predict.future_video.token_in = {"type": "mlp", "mlp_dim": 8}
     with pytest.raises(AssertionError, match="adds no tokens of its own"):
         build_algorithm(cfg)
+
+
+def test_clean_token_streams_pick_their_projection():
+    """A via: tokens stream enters through token_in: the SwiGLU lift by default, or a
+    linear / identity projection (RoboJEPA's linear visual lift, its per-embodiment
+    action tokens that already have the trunk width)."""
+    cfg = mixed_cfg()
+    cfg.conditioning.video_context.token_in = {"type": "mlp", "mlp_dim": 8}
+    proj = build_algorithm(cfg).predictor.clean_proj["video_context"]
+    assert proj[0].w.out_features == 8
+    cfg.conditioning.video_context.token_in = {"type": "linear"}
+    assert isinstance(build_algorithm(cfg).predictor.clean_proj["video_context"], torch.nn.Linear)
+    cfg.conditioning.video_context.token_in = {"type": "identity"}
+    dim = cfg.conditioning.video_context.dim
+    cfg.model.model_dim = dim
+    assert isinstance(build_algorithm(cfg).predictor.clean_proj["video_context"],
+                      torch.nn.Identity)
 
 
 def test_direct_input_tokens_are_exempt_from_role_rule():

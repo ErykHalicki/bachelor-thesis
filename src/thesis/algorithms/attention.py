@@ -34,6 +34,15 @@ def _run_flex(q, k, v, block_mask):
         return _flex(q, k, v, block_mask=block_mask)
 
 
+def make_qk_norm(kind, head_dim):
+    """QK-norm over the head dim: `layernorm` (the DiT trunk's) or `rmsnorm` (RoboJEPA's)."""
+    if kind == "layernorm":
+        return nn.LayerNorm(head_dim)
+    if kind == "rmsnorm":
+        return nn.RMSNorm(head_dim, eps=1e-6)
+    raise ValueError(f"unknown qk_norm '{kind}'; use 'layernorm' or 'rmsnorm'")
+
+
 def split_heads(x, num_heads):
     B, N, D = x.shape
     return x.reshape(B, N, num_heads, D // num_heads).transpose(1, 2)
@@ -58,23 +67,30 @@ class SelfAttention(nn.Module):
     dim_head.
     """
 
-    def __init__(self, hidden_size, num_heads, dim_head=None):
+    def __init__(self, hidden_size, num_heads, dim_head=None, qk_norm="layernorm"):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim_head if dim_head is not None else hidden_size // num_heads
         inner = num_heads * head_dim
         self.qkv = nn.Linear(hidden_size, 3 * inner)
-        self.q_norm = nn.LayerNorm(head_dim)
-        self.k_norm = nn.LayerNorm(head_dim)
+        self.q_norm = make_qk_norm(qk_norm, head_dim)
+        self.k_norm = make_qk_norm(qk_norm, head_dim)
         self.out_proj = nn.Linear(inner, hidden_size)
 
-    def forward(self, x, freqs=None, attn_mask=None):
+    def forward(self, x, freqs=None, attn_mask=None, qk_bias=None):
+        """qk_bias: optional (B, N, head_dim) added to every head's queries and keys AFTER
+        RoPE -- a content offset rather than a position, so it reaches the scores without
+        being rotated (RoboJEPA's per-layer view bias). Zero rows leave a token as is."""
         q, k, v = (split_heads(t, self.num_heads) for t in self.qkv(x).chunk(3, dim=-1))
         q = self.q_norm(q)
         k = self.k_norm(k)
         if freqs is not None:
             q = apply_rotary_emb(freqs, q)
             k = apply_rotary_emb(freqs, k)
+        if qk_bias is not None:
+            bias = qk_bias.unsqueeze(1).to(q.dtype)
+            q = q + bias
+            k = k + bias
         out = attend(q.to(v.dtype), k.to(v.dtype), v, attn_mask)
         return self.out_proj(merge_heads(out))
 

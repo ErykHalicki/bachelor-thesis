@@ -43,13 +43,16 @@ streams (`via: tokens`) enter through the same MLP lift, minus the timestep conc
 they are never denoised, so `t` has nothing to tell them. See docs/.claude/config-spec.md.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
 from ..utils.spec import action_entry, parse_index
-from .block import DiTBlock, MoTBlock
+from .block import DiTBlock, MoTBlock, PreNormBlock
 from .layers import (
-    FinalLayer, InputLayer, MLPFinalLayer, MLPInputLayer, TimestepEmbedder, make_mlp,
+    FinalLayer, InputLayer, LinearHead, MLPFinalLayer, MLPInputLayer, TimestepEmbedder,
+    make_mlp,
 )
 from .masking import (assert_no_attention_path, block_causal_flex_mask,
                       block_causal_mask, block_intervals, build_stream_visibility)
@@ -77,6 +80,17 @@ def _stream_geometry(spec):
     return indices, indices.to(torch.float64) / fps, grid, fps, block_size
 
 
+def stream_views(spec):
+    """Camera slots per step of a stream (`views:`, default 1). Each slot carries its own
+    `grid`, so a step is views * grid area tokens, ordered view-major."""
+    return int(spec.get("views", 1))
+
+
+def tokens_per_step(spec):
+    grid = tuple(spec.get("grid", (1, 1)))
+    return stream_views(spec) * int(grid[0]) * int(grid[1])
+
+
 def _stream_times(spec):
     """The time (seconds) of each index step of a stream, ignoring its spatial grid."""
     indices = torch.tensor(parse_index(spec["index"]), dtype=torch.long)
@@ -89,6 +103,35 @@ def is_direct(spec):
 
 def is_mse(spec):
     return spec.get("type") == "mse"
+
+
+def _clean_in(name, spec, model_dim):
+    """A conditioning token stream's projection into the trunk: `token_in: {type: mlp}`
+    (the default, the SwiGLU lift every clean stream used to get, inner width `mlp_dim`,
+    default model_dim), `linear`, or `identity`
+    (the stream's encoder already emits trunk-width tokens, e.g. a per-embodiment
+    projection)."""
+    block = dict(spec.get("token_in") or {})
+    kind = block.pop("type", "mlp")
+    mlp_dim = block.pop("mlp_dim", None)
+    if block:
+        raise ValueError(f"'{name}' token_in declares unknown keys {sorted(block)}")
+    if mlp_dim is not None and kind != "mlp":
+        raise ValueError(f"'{name}' token_in is {kind}, which has no mlp_dim to set")
+    dim = int(spec["dim"])
+    if kind == "mlp":
+        return make_mlp(dim, int(mlp_dim or model_dim), model_dim)
+    if kind == "linear":
+        return nn.Linear(dim, model_dim)
+    if kind == "identity":
+        if dim != model_dim:
+            raise ValueError(
+                f"'{name}' token_in is identity, so its dim {dim} must equal model_dim "
+                f"{model_dim}"
+            )
+        return nn.Identity()
+    raise ValueError(f"'{name}' token_in declares unknown type '{kind}'; "
+                     f"use mlp, linear or identity")
 
 
 def _token_io(name, spec, key, default_mlp_dim):
@@ -106,6 +149,13 @@ def _token_io(name, spec, key, default_mlp_dim):
         return "mlp", default_mlp_dim
     block = dict(block)
     kind, mlp_dim = block.pop("type", "mlp"), block.pop("mlp_dim", None)
+    if kind == "linear":
+        norm = block.pop("norm", None)
+        if block or mlp_dim is not None:
+            raise ValueError(f"'{name}' {key} is linear, which takes only `norm`")
+        if key != "token_out":
+            raise ValueError(f"'{name}' token_in cannot be linear on a predicted stream")
+        return kind, norm
     if block:
         raise ValueError(f"'{name}' {key} declares unknown keys {sorted(block)}")
     if kind == "adaln":
@@ -198,9 +248,44 @@ class GenericViTTrunk(nn.Module):
         rope=None,
         experts=None,
         independent_flow_time=False,
+        block="dit",
+        norm="rmsnorm",
+        qk_norm=None,
+        final_norm=None,
+        attention_window=None,
+        embodiment=None,
+        camera=None,
+        init=None,
     ):
+        """Beyond the DiT defaults (see the module docstring), a few keys build other
+        trunks from the same spec -- RoboJEPA's predictor is `block: prenorm`,
+        `qk_norm: rmsnorm`, `final_norm: rmsnorm`, `attention_window: <seconds>`,
+        `embodiment:`/`camera:` conditioning and `init: robojepa`:
+
+          block             dit (adaLN-modulated, the default) | prenorm (plain ViT block,
+                            no cond; flow, cross and cond streams need dit)
+          norm, qk_norm     a prenorm block's norms (rmsnorm | layernorm); qk_norm also
+                            applies to dit blocks (default layernorm there)
+          final_norm        rmsnorm | layernorm | null: one affine norm over the residual
+                            stream before the heads
+          attention_window  seconds; a query attends only the keys whose causal block ends
+                            within that span of its own (needs causal: true)
+          embodiment        {field, num, streams}: a zero-init learned vector per
+                            embodiment id (batch field `field`, (B,) long) added to every
+                            token of `streams`
+          camera            {field, num, streams, input_embedding, attention_bias}: the
+                            semantic camera id of each view slot (batch field, (B, views)
+                            long). input_embedding adds a zero-init vector per id to the
+                            stream's tokens; attention_bias gives every prenorm block a
+                            zero-init per-id (head_dim) bias on queries and keys after RoPE
+          init              null (each module's own) | robojepa: trunc-normal(0.02) on
+                            every Linear, zero biases, and each block's attention output
+                            and second MLP layer scaled by 1/sqrt(2 * layer)
+        """
         super().__init__()
         self.depth = depth
+        assert block in ("dit", "prenorm"), f"unknown block '{block}'; use dit or prenorm"
+        self.block_type = block
         self.attn_backend = _resolve_attn_backend(attn_backend)
         self.gradient_checkpointing = False
 
@@ -208,10 +293,13 @@ class GenericViTTrunk(nn.Module):
         for name, spec in conditioning.items():
             via = spec.get("via", "tokens")
             assert via in ("tokens", "cross", "cond", None), f"unknown via '{via}' for '{name}'"
-            assert not (spec.get("token_in") or spec.get("token_out")), (
-                f"conditioning stream '{name}' declares token_in/token_out, which configure "
-                "a PREDICTED stream's projections; a conditioning stream enters through a "
-                "plain linear and is never read by a head"
+            assert not spec.get("token_out"), (
+                f"conditioning stream '{name}' declares token_out, which configures a "
+                "PREDICTED stream's head; a conditioning stream is never read by a head"
+            )
+            assert not (spec.get("token_in") and via != "tokens"), (
+                f"conditioning stream '{name}' declares token_in, but only a via: tokens "
+                "stream enters the trunk through one"
             )
             if via is None:
                 # `via: null`: encoded for loss terms and seeds, never a trunk input
@@ -233,13 +321,13 @@ class GenericViTTrunk(nn.Module):
         offset = 0
         for name, spec in clean_streams + noisy_streams + query_streams:
             indices, times, grid, fps, block_size = _stream_geometry(spec)
-            spatial = grid[0] * grid[1]
+            spatial = tokens_per_step(spec)
             n = len(indices) * spatial
             self.stream_order.append(name)
             self.stream_slices[name] = slice(offset, offset + n)
             self.stream_dims[name] = int(spec["dim"])
             offset += n
-            pos_parts.append(make_pos_ids(times.float(), grid))
+            pos_parts.append(make_pos_ids(times.float(), grid, stream_views(spec)))
             s, e = block_intervals(indices.repeat_interleave(spatial), fps, block_size)
             starts.append(s)
             ends.append(e)
@@ -247,12 +335,16 @@ class GenericViTTrunk(nn.Module):
 
         # `seq` needs every stream's token count, so it can only be assigned here, and it
         # follows declaration order: reordering `conditioning:` moves every token position
-        pos = {axis: torch.cat([p[axis] for p in pos_parts]) for axis in pos_parts[0]}
+        # a stream without a view (or grid) axis sits at 0 on it, an identity rotation
+        axes = list(dict.fromkeys(a for p in pos_parts for a in p))
+        pos = {axis: torch.cat([p.get(axis, torch.zeros_like(p["time"])) for p in pos_parts])
+               for axis in axes}
         pos["seq"] = torch.arange(self.num_tokens, dtype=torch.float32)
         self.rope = RopeND(dim_head or model_dim // num_heads, axes_from_positions(pos, rope))
         # `seq` alone also places a grid: every token, every patch included, gets its own
         # position, and the grid's flattening order is fixed, so the patch layout is learnable
-        dropped = [a for a in ("height", "width") if pos[a].any() and a not in self.rope.axes]
+        dropped = [a for a in ("height", "width", "view")
+                   if a in pos and pos[a].any() and a not in self.rope.axes]
         assert not dropped or "seq" in self.rope.axes, (
             f"a stream declares a grid, but model.rope leaves {dropped} out of "
             f"{list(self.rope.axes)} and has no `seq` axis: its patch coordinates would be "
@@ -283,9 +375,7 @@ class GenericViTTrunk(nn.Module):
                 f"direct stream '{name}' names input '{src}', which is not a token stream"
             )
             n_input = self.stream_slices[src].stop - self.stream_slices[src].start
-            n_target = len(parse_index(spec["index"])) * (
-                lambda g: g[0] * g[1]
-            )(tuple(spec.get("grid", (1, 1))))
+            n_target = len(parse_index(spec["index"])) * tokens_per_step(spec)
             assert n_input == n_target, (
                 f"direct stream '{name}': input '{src}' has {n_input} tokens but its target "
                 f"window has {n_target}; the windows are paired positionally so they must match"
@@ -342,6 +432,12 @@ class GenericViTTrunk(nn.Module):
         self._time_start = start.clone()
         self._time_end = end.clone()
         self._time_causal = bool(causal)
+        assert attention_window is None or causal, (
+            "attention_window bounds how far back a query looks on the causal time axis, "
+            "so it needs `model.causal: true`"
+        )
+        self.attention_window = (None if attention_window is None
+                                 else float(attention_window))
         if not causal:
             # every token's block spans all time, so `kv_start < q_end` holds everywhere
             # and `block_size` stops meaning anything. A `direct` stream needs causal:
@@ -360,7 +456,8 @@ class GenericViTTrunk(nn.Module):
             if self.attn_backend == "sdpa":
                 self.register_buffer(
                     "dense_mask",
-                    block_causal_mask(start, end, stream_ids=stream_ids, vis=full_vis),
+                    block_causal_mask(start, end, stream_ids=stream_ids, vis=full_vis,
+                                      window=self.attention_window),
                     persistent=False,
                 )
             else:
@@ -407,7 +504,7 @@ class GenericViTTrunk(nn.Module):
         # clean/conditioning streams enter through the same MLP lift, minus the
         # timestep: they are never denoised, so `t` has nothing to tell them
         self.clean_proj = nn.ModuleDict({
-            name: make_mlp(int(spec["dim"]), model_dim, model_dim) for name, spec in clean_streams
+            name: _clean_in(name, spec, model_dim) for name, spec in clean_streams
         })
         self.noisy_proj = nn.ModuleDict()
         # the streams whose token_in reads the bare timestep slot instead of the full cond
@@ -430,11 +527,17 @@ class GenericViTTrunk(nn.Module):
 
         self.heads = nn.ModuleDict()
         for name, spec in noisy_streams + query_streams + direct_streams:
-            kind, mlp_dim = _token_io(name, spec, "token_out", model_dim)
-            self.heads[name] = (
-                MLPFinalLayer(model_dim, int(spec["dim"]), mlp_dim) if kind == "mlp"
-                else FinalLayer(model_dim, int(spec["dim"]), cond_dim=cond_dim)
-            )
+            kind, arg = _token_io(name, spec, "token_out", model_dim)
+            if kind == "mlp":
+                self.heads[name] = MLPFinalLayer(model_dim, int(spec["dim"]), arg)
+            elif kind == "linear":
+                self.heads[name] = LinearHead(model_dim, int(spec["dim"]), norm=arg)
+            else:
+                assert block == "dit", (
+                    f"'{name}' token_out is adaln, which reads the AdaLN cond a prenorm "
+                    "trunk does not build"
+                )
+                self.heads[name] = FinalLayer(model_dim, int(spec["dim"]), cond_dim=cond_dim)
         # applied to the head output inside forward, so training, rollout and CEM all
         # see the decoded prediction
         self.decoders = nn.ModuleDict()
@@ -449,15 +552,160 @@ class GenericViTTrunk(nn.Module):
         block_kwargs = dict(source_dims=source_dims or None, mlp_ratio=mlp_ratio,
                             mlp_dim=mlp_dim, dropout=dropout, cond_dim=cond_dim,
                             dim_head=dim_head)
-        if self.expert_names:
+        self._build_ids(embodiment, camera, model_dim)
+        if block == "prenorm":
+            unsupported = {
+                "flow streams": self.flow_names, "via: cross streams": self.source_order,
+                "via: cond streams": self.cond_order, "experts": self.expert_names,
+            }
+            bad = {k: v for k, v in unsupported.items() if v}
+            assert not bad, (
+                f"block: prenorm has no AdaLN or cross-attention, so it cannot carry {bad}; "
+                "use block: dit"
+            )
+            view_bias = (int(self.camera["num"])
+                         if self.camera and self.camera.get("attention_bias") else None)
+            self.blocks = nn.ModuleList([
+                PreNormBlock(model_dim, num_heads, mlp_ratio=mlp_ratio, dropout=dropout,
+                             dim_head=dim_head, mlp_dim=mlp_dim, norm=norm,
+                             qk_norm=qk_norm or "rmsnorm", view_bias=view_bias)
+                for _ in range(depth)
+            ])
+        elif self.expert_names:
+            assert qk_norm in (None, "layernorm"), "MoT blocks only take layernorm qk_norm"
             self.blocks = nn.ModuleList([
                 MoTBlock(model_dim, num_heads, len(self.expert_names), **block_kwargs)
                 for _ in range(depth)
             ])
         else:
+            assert not (self.camera and self.camera.get("attention_bias")), (
+                "camera.attention_bias lives in the prenorm block; use block: prenorm"
+            )
             self.blocks = nn.ModuleList([
-                DiTBlock(model_dim, num_heads, **block_kwargs) for _ in range(depth)
+                DiTBlock(model_dim, num_heads, qk_norm=qk_norm or "layernorm", **block_kwargs)
+                for _ in range(depth)
             ])
+        self.final_norm = None
+        if final_norm == "rmsnorm":
+            self.final_norm = nn.RMSNorm(model_dim, eps=1e-6)
+        elif final_norm == "layernorm":
+            self.final_norm = nn.LayerNorm(model_dim, eps=1e-6)
+        elif final_norm is not None:
+            raise ValueError(f"unknown final_norm '{final_norm}'")
+        if init == "robojepa":
+            self._robojepa_init()
+        elif init is not None:
+            raise ValueError(f"unknown init '{init}'; use null or robojepa")
+
+    def _build_ids(self, embodiment, camera, model_dim):
+        """Per-sample identity conditioning (`model.embodiment`, `model.camera`): which
+        tokens each one reaches, and the zero-init tables it adds. Read from batch fields
+        the algorithm forwards as `meta` (see `meta_fields`)."""
+        self.embodiment = dict(embodiment) if embodiment else None
+        self.camera = dict(camera) if camera else None
+        self.meta_fields = []
+
+        def stream_mask(streams, what):
+            unknown = [n for n in streams if n not in self.stream_slices]
+            assert not unknown, f"{what} names {unknown}, which are not token streams"
+            mask = torch.zeros(self.num_tokens, dtype=torch.bool)
+            for n in streams:
+                mask[self.stream_slices[n]] = True
+            return mask
+
+        if self.embodiment:
+            streams = list(self.embodiment.get("streams") or self.stream_order)
+            self.register_buffer("embodiment_tokens",
+                                 stream_mask(streams, "model.embodiment.streams"),
+                                 persistent=False)
+            self.embodiment_embed = nn.Embedding(int(self.embodiment["num"]), model_dim)
+            nn.init.zeros_(self.embodiment_embed.weight)
+            self.meta_fields.append(str(self.embodiment["field"]))
+        if self.camera:
+            streams = list(self.camera.get("streams") or [])
+            assert streams, "model.camera needs `streams`: the token streams with view slots"
+            mask = stream_mask(streams, "model.camera.streams")
+            view = getattr(self, "pos_view", None)
+            slot = torch.full((self.num_tokens,), -1, dtype=torch.long)
+            slot[mask] = (view[mask].long() if view is not None
+                          else torch.zeros(int(mask.sum()), dtype=torch.long))
+            self.register_buffer("camera_slot", slot, persistent=False)
+            self.camera_embed = None
+            if self.camera.get("input_embedding", True):
+                self.camera_embed = nn.Embedding(int(self.camera["num"]), model_dim)
+                nn.init.zeros_(self.camera_embed.weight)
+            self.meta_fields.append(str(self.camera["field"]))
+
+    def _robojepa_init(self):
+        """RoboJEPA / V-JEPA predictor init: trunc-normal(0.02) Linear weights, zero biases,
+        and the residual-branch outputs of block i scaled by 1/sqrt(2i). The zero-init
+        identity tables are left alone."""
+        assert self.block_type == "prenorm", "init: robojepa is the prenorm trunk's init"
+        for group in (self.blocks, self.clean_proj, self.noisy_proj, self.heads):
+            for mod in group.modules():
+                if isinstance(mod, nn.Linear):
+                    nn.init.trunc_normal_(mod.weight, std=0.02)
+                    if mod.bias is not None:
+                        nn.init.zeros_(mod.bias)
+        for i, blk in enumerate(self.blocks, start=1):
+            blk.sa.out_proj.weight.data.div_(math.sqrt(2.0 * i))
+            blk.mlp[-1].weight.data.div_(math.sqrt(2.0 * i))
+
+    def _identity_terms(self, x, meta, idx):
+        """Add the embodiment/camera input embeddings to `x` (active layout `idx`, None =
+        full) and return the per-token camera id the blocks' view bias reads, or None."""
+        if not self.embodiment and not self.camera:
+            return x, None
+        meta = meta or {}
+        missing = [f for f in self.meta_fields if f not in meta]
+        assert not missing, f"trunk needs batch fields {missing} (model.embodiment/camera)"
+        if self.embodiment:
+            mask = self.embodiment_tokens if idx is None else self.embodiment_tokens[idx]
+            emb = self.embodiment_embed(meta[self.embodiment["field"]].long().view(-1))
+            x = x + emb[:, None].to(x.dtype) * mask.view(1, -1, 1).to(x.dtype)
+        view_ids = None
+        if self.camera:
+            slot = self.camera_slot if idx is None else self.camera_slot[idx]
+            ids = meta[self.camera["field"]].long()
+            sem = torch.where(slot >= 0, ids[:, slot.clamp(min=0)], torch.full_like(ids[:, :1], -1))
+            if self.camera_embed is not None:
+                x = x + (self.camera_embed(sem.clamp(min=0))
+                         * (sem >= 0).unsqueeze(-1)).to(x.dtype)
+            if self.camera.get("attention_bias"):
+                view_ids = sem
+        return x, view_ids
+
+    def _padded_mask(self, attn_mask, valid, out_slices, idx, batch, device):
+        """Fold per-sample token validity into the attention mask: a padded token (an
+        empty camera slot, say) is nobody's key. Returns a dense (B, 1, N, N) mask; each
+        token still attends itself, so a padded query's row is never empty (its output
+        is read by no loss)."""
+        n = sum(sl.stop - sl.start for sl in out_slices.values()) if idx is not None \
+            else self.num_tokens
+        key = torch.ones(batch, n, dtype=torch.bool, device=device)
+        for name, v in valid.items():
+            if name in out_slices:
+                key[:, out_slices[name]] = v.to(device=device, dtype=torch.bool)
+        if attn_mask is None:
+            base = torch.ones(n, n, dtype=torch.bool, device=device)
+        elif torch.is_tensor(attn_mask):
+            base = attn_mask
+        else:
+            base = self._dense_layout_mask(idx).to(device)
+        eye = torch.eye(n, dtype=torch.bool, device=device)
+        return ((base[None] & key[:, None, :]) | eye[None]).unsqueeze(1)
+
+    def _dense_layout_mask(self, idx):
+        """The time/visibility mask of a layout as a dense bool tensor (the flex path's
+        BlockMask cannot absorb per-sample padding)."""
+        sel = slice(None) if idx is None else idx.cpu()
+        start, end = self._time_start[sel], self._time_end[sel]
+        if not self._time_causal:
+            start = torch.full_like(start, float("-inf"))
+            end = torch.full_like(end, float("inf"))
+        vis = None if bool(self._vis.all()) else self._vis
+        return block_causal_mask(start, end, stream_ids=self.all_stream_ids[sel].cpu(),
+                                 vis=vis, window=self.attention_window)
 
     def _cond_map(self, cond_times):
         """Row of a cond stream feeding each token, by matching the token's time; -1 = none."""
@@ -526,11 +774,13 @@ class GenericViTTrunk(nn.Module):
         mask = None
         if self._time_causal or vis is not None:
             if self.attn_backend == "sdpa":
-                mask = block_causal_mask(start, end, stream_ids=ids, vis=vis).to(device)
+                mask = block_causal_mask(start, end, stream_ids=ids, vis=vis,
+                                         window=self.attention_window).to(device)
             else:
                 mask = block_causal_flex_mask(start.to(device), end.to(device),
                                               stream_ids=ids.to(device),
-                                              vis=None if vis is None else vis.to(device))
+                                              vis=None if vis is None else vis.to(device),
+                                              window=self.attention_window)
         self._subset_cache[key] = (idx, slices, mask)
         return idx, slices, mask
 
@@ -558,6 +808,7 @@ class GenericViTTrunk(nn.Module):
             self._flex_mask = block_causal_flex_mask(
                 self.block_start, self.block_end,
                 stream_ids=self.stream_ids, vis=self.vis_table,
+                window=self.attention_window,
             )
         return self._flex_mask
 
@@ -601,7 +852,7 @@ class GenericViTTrunk(nn.Module):
         return value
 
     def forward(self, tokens, t=None, sources=None, source_masks=None, cond=None,
-                use_kv_cache=False):
+                use_kv_cache=False, meta=None, valid=None):
         """
         tokens:       dict with one (B, N_name, dim_name) tensor per token stream; clean streams
                       carry encoded observations, flow streams x_t
@@ -610,11 +861,18 @@ class GenericViTTrunk(nn.Module):
         sources:      dict name -> (B, S, dim) tensor or list of `depth` tensors
         source_masks: dict name -> (B, S) bool, True = ignore
         cond:         dict name -> (B, rows, dim) per-frame AdaLN conditioning
+        meta:         dict batch field -> tensor, the identity fields `model.embodiment` /
+                      `model.camera` read (`meta_fields`)
+        valid:        dict token stream -> (B, N_name) bool, False = padding: the token is
+                      masked out as a key for every query
         Returns dict name -> velocity (flow streams) / next-value prediction (direct streams).
         """
         sources, source_masks, cond = sources or {}, source_masks or {}, cond or {}
         ref = next(iter(tokens.values()))
-        c, temb = self._build_cond(t, cond, ref.shape[0], ref.device, ref.dtype)
+        if self.block_type == "prenorm":
+            c, temb = None, None
+        else:
+            c, temb = self._build_cond(t, cond, ref.shape[0], ref.device, ref.dtype)
 
         active = [n for n in self.stream_order if n in tokens]
         subset = len(active) < len(self.stream_order)
@@ -647,13 +905,20 @@ class GenericViTTrunk(nn.Module):
             freqs = self.rope({a: getattr(self, f"pos_{a}")[idx] for a in self.pos_axes})
             routes = self._routes(idx)
         else:
+            idx = None
             out_slices = self.stream_slices
             freqs = self.rope({a: getattr(self, f"pos_{a}") for a in self.pos_axes})
             attn_mask = self._mask()
             routes = self._routes()
+        x, view_ids = self._identity_terms(x, meta, idx)
+        if valid:
+            attn_mask = self._padded_mask(attn_mask, valid, out_slices, idx,
+                                          x.shape[0], x.device)
         masks = [source_masks.get(name) for name in self.source_order] or None
-        # MoTBlock takes the routes as a trailing positional; DiTBlock takes none
-        extra = (routes,) if self.expert_names else ()
+        # MoTBlock takes the routes as a trailing positional, PreNormBlock the per-token
+        # camera ids; DiTBlock takes none
+        extra = ((routes,) if self.expert_names
+                 else (view_ids,) if self.block_type == "prenorm" else ())
 
         for i, block in enumerate(self.blocks):
             layer_sources = [self._layer_source(sources.get(name), i) for name in self.source_order]
@@ -668,6 +933,8 @@ class GenericViTTrunk(nn.Module):
             else:
                 x = block(x, c, layer_sources, masks, freqs, attn_mask, use_kv_cache, *extra)
 
+        if self.final_norm is not None:
+            x = self.final_norm(x)
         out = {}
         for name in self.predict_names:
             src = self.direct_input.get(name, name)
@@ -675,7 +942,8 @@ class GenericViTTrunk(nn.Module):
                 continue
             sl = out_slices[src]
             full_sl = self.stream_slices[src]
-            out[name] = self.heads[name](x[:, sl], self._slice_cond(c, full_sl))
+            out[name] = self.heads[name](x[:, sl],
+                                         None if c is None else self._slice_cond(c, full_sl))
             # a flow stream's forward output is a VELOCITY; its decoder applies to the
             # integrated endpoint in ode_solve, never here
             if name in self.decoders and name not in self.flow_names:
@@ -684,7 +952,8 @@ class GenericViTTrunk(nn.Module):
 
     @torch.no_grad()
     def rollout(self, tokens, sources=None, source_masks=None, cond=None, num_steps=10,
-                cfg_scale=1.0, cfg_drop=(), x0=None, streams=None, clamp=None):
+                cfg_scale=1.0, cfg_drop=(), x0=None, streams=None, clamp=None, meta=None,
+                valid=None):
         """One inference pass: Euler-integrate the flow streams from noise (or the A2A
         seeds in `x0`), or -- when nothing is flow -- a single deterministic forward.
         Returns dict name -> prediction. `streams` restricts integration to those
@@ -696,7 +965,8 @@ class GenericViTTrunk(nn.Module):
         if not self.flow_names:
             tokens = {**tokens, **{n: self.query_embed[n] for n in self.query_names
                                    if streams is None or n in streams}}
-            return self(tokens, None, sources, source_masks, cond=cond)
+            return self(tokens, None, sources, source_masks, cond=cond, meta=meta, valid=valid)
+        assert not (meta or valid), "identity/padding fields reach direct trunks only so far"
         return self.ode_solve(tokens, sources, source_masks, cond=cond, num_steps=num_steps,
                               cfg_scale=cfg_scale, cfg_drop=cfg_drop, x0=x0, streams=streams,
                               clamp=clamp)
@@ -860,7 +1130,7 @@ class GenericViTPredictor(PredictiveModel):
                 trunk.decoders[name] = self.encoders[dec]
         return trunk
 
-    def _forward_train(self, clean, sources, cond, targets, seeds=None):
+    def _forward_train(self, clean, sources, cond, targets, seeds=None, meta=None, valid=None):
         seeds = seeds or {}
         flow = {n: targets[n] for n in self.predictor.flow_names}
         t, x_t, target = None, {}, {}
@@ -885,13 +1155,68 @@ class GenericViTPredictor(PredictiveModel):
         target.update({n: targets[n] for n in self.predictor.query_names})
 
         queries = {n: self.predictor.query_embed[n] for n in self.predictor.query_names}
-        pred = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond)
+        pred = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
+                              meta=meta, valid=valid)
         for n, rows in clean_rows.items():
             # a stream handed in clean is conditioning on that row, not a prediction: its
             # velocity target needs the x0 the clean input no longer carries, so the row
             # scores zero rather than noise
             target[n] = torch.where(rows.view(-1, 1, 1), pred[n].detach(), target[n])
         return pred, target
+
+    def _forward_rollout(self, stream, steps, prefix, clean, sources, cond, targets, pred,
+                         meta, valid, target_valid):
+        """RoboJEPA's autoregressive rollout of the direct stream `stream`.
+
+        Input position p of the stream's `input` predicts target position p (the next
+        step), so for a prefix tau the history is the true latents 0..tau, the
+        teacher-forced prediction of tau + 1 written into input position tau + 1, and then
+        `steps - 1` further trunk passes, each reading position tau + h and writing its
+        prediction into tau + h + 1. Every pass runs the full window: the causal mask keeps
+        the not-yet-overwritten future inputs out of every output that is read. Inputs fed
+        back are detached (RoboJEPA's rollout_stop_gradient); actions and proprioception are
+        the recorded ones throughout.
+
+        `random` draws one tau in [0, P - steps] with P the batch's fewest valid target
+        steps (none when P < steps); `all` uses every tau up to the longest clip's limit,
+        each sample scored only where its targets are valid.
+        """
+        src = self.predictor.direct_input[stream]
+        per = self._tokens_per_step[src]
+        z, tf, tgt = clean[src], pred[stream], targets[stream]
+        B, N, D = z.shape
+        T = N // per
+        assert steps <= T, f"rollout of {steps} steps does not fit a {T}-step window"
+        tv = (target_valid if target_valid is not None
+              else torch.ones(B, N, dtype=torch.bool, device=z.device))
+        tv_steps = tv.view(B, T, per).any(-1)
+        valid_steps = tv_steps.long().sum(1)
+        if prefix == "random":
+            limit = int(valid_steps.min())
+            taus = ([int(torch.randint(limit - steps + 1, ()).item())]
+                    if limit >= steps else [])
+        else:
+            taus = list(range(int(valid_steps.max()) - steps + 1))
+
+        def at(x, p):
+            return x.view(B, T, per, *x.shape[2:])[:, p]
+
+        rollouts = []
+        for tau in taus:
+            hist = z.detach().view(B, T, per, D).clone()
+            hist[:, tau + 1] = at(tf, tau).detach().to(hist.dtype)
+            out_steps = [(at(tf, tau).detach(), at(tgt, tau), at(tv, tau))]
+            for h in range(1, steps):
+                p = tau + h
+                out = self.predictor({**clean, src: hist.flatten(1, 2)}, None, sources,
+                                     cond=cond, meta=meta, valid=valid)[stream]
+                step_pred = at(out, p)
+                out_steps.append((step_pred, at(tgt, p), at(tv, p)))
+                if p + 1 < T:
+                    hist = hist.clone()
+                    hist[:, p + 1] = step_pred.detach().to(hist.dtype)
+            rollouts.append(out_steps)
+        return rollouts
 
     def _build_time_groups(self, groups):
         """`flow_time.groups` -> a list of stream-name lists, one per independent time draw.
