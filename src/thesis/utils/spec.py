@@ -8,7 +8,11 @@ def _parse_part(part):
             return [LAST]
         if ".." in part:
             lo, hi = part.split("..")
-            return list(range(int(lo), int(hi) + 1))
+            hi, _, step = hi.partition(":")
+            step = int(step) if step.strip() else 1
+            if step <= 0:
+                raise ValueError(f"range step must be positive in '{part}'")
+            return list(range(int(lo), int(hi) + 1, step))
     return [int(part)]
 
 
@@ -20,6 +24,7 @@ def parse_index(index):
         "0..47"        -> [0, 1, ..., 47]
         "-12..-1"      -> [-12, -11, ..., -1]
         "-8..-2, 0"    -> [-8, -7, ..., -2, 0]
+        "5..30:5"      -> [5, 10, ..., 30]   (a strided range, upper bound inclusive if hit)
         "last"         -> ["last"]   (the episode's final frame, e.g. a goal image)
     A `"last"` entry is not a relative offset: the dataset resolves it to the last frame of
     the sample's episode, and at eval it is sourced from the env goal image.
