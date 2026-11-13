@@ -124,7 +124,7 @@ def handle_init(msg, device, cache):
                 f"set eval.goal_image"
             )
         driver = PlanDriver(model, cfg, msg["obs_features"], decode_jpeg(msg["goal"]),
-                            plan=msg.get("plan"))
+                            plan=msg.get("plan"), goal_state=msg.get("goal_state"))
     print(f"session: execute_len={driver.execute_len} "
           + " ".join(f"{k}={v}" for k, v in driver.sampling.items()), flush=True)
     return driver, {
@@ -162,6 +162,7 @@ def serve_client(conn, device, cache):
                     {col: decode_jpeg(v) if isinstance(v, bytes) else v for col, v in frame.items()}
                     for frame in msg["frames"]
                 ]
+                driver.steps_taken = msg.get("t")
                 actions = driver.predict_window(window, msg.get("actions") or [])
                 reply = {"actions": actions, "compute_s": time.perf_counter() - started}
             else:

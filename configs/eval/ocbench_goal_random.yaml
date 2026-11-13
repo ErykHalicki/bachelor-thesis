@@ -1,0 +1,12 @@
+# Short-horizon goals from random held-out frames: no filter on cube motion, run the full
+# budget, and score how close the cube and arm get to the demo's state at the goal frame.
+defaults:
+  - ocbench_goal
+  - _self_
+
+sampling: random
+goal_offset: 50
+budget_steps: 75
+min_cube_move: 0.0
+stop_at_goal: false
+zero_actions: false

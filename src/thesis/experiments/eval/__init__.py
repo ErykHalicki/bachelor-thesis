@@ -9,6 +9,9 @@ def build_eval(cfg):
     if backend == "offline":
         from .offline import OfflineEval
         return OfflineEval(cfg)
+    if backend == "plan_offline":
+        from .plan_offline import OfflinePlanEval
+        return OfflinePlanEval(cfg)
     if backend == "reconstruction":
         from .reconstruction import ReconstructionEval
         return ReconstructionEval(cfg)
@@ -18,6 +21,12 @@ def build_eval(cfg):
     if backend == "lerobot":
         from .lerobot import LeRobotEval
         return LeRobotEval(cfg)
+    if backend == "pusht_goal":
+        from .pusht_goal import PushTGoalEval
+        return PushTGoalEval(cfg)
+    if backend == "ocbench_goal":
+        from .ocbench_goal import OCBenchGoalEval
+        return OCBenchGoalEval(cfg)
     if backend == "ocbench":
         from .ocbench import OCBenchEval
         return OCBenchEval(cfg)

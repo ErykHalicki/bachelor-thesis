@@ -1,0 +1,13 @@
+# The H-JEPA paper's Cube tasks (goal_offset_20_pickup_val): one window per held-out episode
+# centred on the grasp, 1 s to the goal (20 steps at OGBench's 20 Hz, 50 at OCBench's 50 Hz),
+# a 1.5x budget and no filter on how far the demo moves the cube.
+defaults:
+  - ocbench_goal
+  - _self_
+
+sampling: pickup
+pickup_anchor: grasp
+pickup_height_delta: 0.02
+goal_offset: 50
+budget_steps: 75
+min_cube_move: 0.0

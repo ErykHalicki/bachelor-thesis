@@ -60,9 +60,11 @@ stream_metrics_window: 300
 
 stream_latency: true
 
-# world models only (a model exposing `plan`): an RGB image of the task's end state,
-# planned toward with CEM; `plan` holds the planner's knobs
+# world models only (a model exposing `make_planner`): an RGB image of the task's end
+# state to plan toward. `plan` is merged over the model's own `plan:` section: the solver
+# per level (gd, cem, or any thesis.planning.register_solver name), horizons, budget
 goal_image: null
+goal_state: null       # raw goal proprio, for a world model that encodes it with the image
 plan: {}
 
 server: null           # e.g. eryk-pc:8080

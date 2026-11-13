@@ -1,0 +1,15 @@
+# Goal-reaching from held-out demonstration states (the H-JEPA paper's Cube protocol): set
+# the simulator to a demo's state, plan toward the demo's frame `goal_offset` steps later,
+# succeed when the cube ends within `tolerance` of where the demo put it.
+defaults:
+  - ocbench
+  - _self_
+
+backend: ocbench_goal
+goal_offset: 150          # control steps (6 stored frames, 3 s)
+budget_steps: 300
+tolerance: 0.04
+goal_camera: observation.images.front
+frame_interval: 25
+episodes: 50
+num_envs: 50

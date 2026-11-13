@@ -1,0 +1,17 @@
+# LeWM's Push-T protocol: 50 dataset rows (seed 42), each set as the env's state and given
+# the dataset frame 25 steps later as the goal, success by the env's own check within 50
+# steps. Plus the held-out losses, as `holdout`.
+defaults:
+  - holdout
+  - _self_
+
+backend: pusht_goal
+goal_offset: 25
+budget_steps: 50
+episodes: 50
+num_envs: 50
+seed: 42
+split: all
+max_videos: 2
+holdout: true
+plan: {}

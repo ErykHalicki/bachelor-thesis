@@ -55,6 +55,19 @@ def _apply_sampling(model, cfg):
     return effective
 
 
+def _plain(cfg):
+    """A config node as plain containers, safe to pickle across the wire."""
+    if cfg is None:
+        return {}
+    try:
+        from omegaconf import OmegaConf
+        if OmegaConf.is_config(cfg):
+            return OmegaConf.to_container(cfg, resolve=True)
+    except ImportError:
+        pass
+    return dict(cfg)
+
+
 def load_goal_image(path):
     """Goal image file -> (H, W, 3) uint8 RGB."""
     import cv2
@@ -74,8 +87,12 @@ def make_driver(model, cfg, obs_features):
             f"{type(model).__name__} plans toward a goal: set eval.goal_image=<path to an "
             f"RGB image of the task's end state>"
         )
-    return PlanDriver(model, cfg, obs_features, load_goal_image(cfg.goal_image),
-                      plan=cfg.get("plan"))
+    goal = load_goal_image(cfg.goal_image)
+    if cfg.get("goal_images"):
+        goal = {model.field: goal,
+                **{str(f): load_goal_image(p) for f, p in dict(cfg.goal_images).items()}}
+    return PlanDriver(model, cfg, obs_features, goal,
+                      plan=cfg.get("plan"), goal_state=cfg.get("goal_state"))
 
 
 def _warm_history(hold, acts, action_len, frame):
@@ -122,6 +139,8 @@ class BaseDriver:
         self._buffer = deque()
         self._latency = None
         self._hold = hold_action
+        self._t = 0
+        self.steps_taken = None
 
 
     def _record_latency(self, **spans) -> None:
@@ -142,8 +161,10 @@ class BaseDriver:
             hist = list(self._hist)
             hist = [hist[0]] * (self.obs_len - len(hist)) + hist
             window = [hist[self.obs_len - 1 + o] for o in self.offsets]
+            self.steps_taken = self._t
             self._buffer.extend(self.predict_window(window, self._executed()))
         action = self._buffer.popleft()
+        self._t += 1
         if self.action_len:
             # recorded after the pop, so a replan at tick t sees actions from ticks < t
             self._acts.append(np.asarray(action, dtype=np.float32))
@@ -250,13 +271,15 @@ class ChunkDriver(BaseDriver):
         self.field_offsets = {f: list(declared.get(f) or dense) for f in self.field_to_col}
         union = sorted({o for offs in self.field_offsets.values() for o in offs})
         override = cfg.get("execute_len")
+        chunk_len = self._chunk_len(model)
         execute_len = (
-            getattr(model, "execute_len", model.chunk_len) if override is None else int(override)
+            getattr(model, "execute_len", chunk_len) if override is None else int(override)
         )
-        if not 1 <= execute_len <= model.chunk_len:
+        execute_len = min(execute_len, chunk_len) if override is None else execute_len
+        if not 1 <= execute_len <= chunk_len:
             raise ValueError(
                 f"eval execute_len={execute_len} is outside the model's chunk of "
-                f"{model.chunk_len} steps."
+                f"{chunk_len} steps."
             )
         self._configure(self.field_to_col.values(), union, execute_len, action_offsets)
 
@@ -285,6 +308,9 @@ class ChunkDriver(BaseDriver):
 
     def predict_window(self, window, actions=()):
         return self.predict_windows([window], [actions])[0]
+
+    def _chunk_len(self, model):
+        return model.chunk_len
 
     def _check_model(self, model):
         if self.action_stream is None:
@@ -364,26 +390,78 @@ class ChunkDriver(BaseDriver):
 
 
 class PlanDriver(ChunkDriver):
-    """A latent world model on the robot: every replan runs CEM toward one goal image,
-    the chunk executed is the plan. Same preprocessing as ChunkDriver; the goal is encoded
-    once at construction, with the same resize the observation frames get.
+    """A latent world model on the robot: every replan solves toward one goal, and the
+    executed chunk is the head of that plan. Same preprocessing as ChunkDriver; the goal
+    image gets the same resize the observation frames do.
 
-    `plan` (a dict of planner knobs, passed to `model.plan`) comes from the eval config; the goal
-    image is an (H, W, 3) uint8 RGB array the client supplies.
+    The model supplies the planning through two calls -- `make_planner(plan)` builds an
+    MPC planner from the eval's `plan:` knobs (which solver per level, horizons, budget),
+    and `plan(planner, obs, goal, steps_taken)` runs one replan -- so the solver (CEM,
+    gradient descent, anything registered in `thesis.planning`) is configuration.
+
+    `goal` is an (H, W, 3) uint8 RGB array for the model's main camera, or a dict of them
+    keyed by field when the model also reads other cameras (`model.view_fields`). A model
+    that also encodes proprioception needs the goal's: `goal_state`, a raw vector in the
+    field's own units.
     """
 
-    def __init__(self, model, cfg, obs_features, goal, plan=None):
+    def __init__(self, model, cfg, obs_features, goal, plan=None, goal_state=None):
+        self.planner = model.make_planner(plan or {})
         super().__init__(model, cfg, obs_features)
-        self.plan_cfg = dict(plan or {})
-        image = torch.as_tensor(np.asarray(goal)).permute(2, 0, 1)[None, None]     # (1,1,C,H,W)
+        self.window_envs = None
+        self.goal = {}
+        images = goal if isinstance(goal, dict) else {model.field: goal}
+        self.set_goals({f: np.asarray(v)[None] for f, v in images.items()},
+                       None if goal_state is None else np.asarray(goal_state)[None])
+
+    def goal_fields(self):
+        return [self.model.field, *getattr(self.model, "view_fields", [])]
+
+    def set_goals(self, images, states=None):
+        """Goals for a batched rollout, one row per world: `images` is (N, H, W, 3) uint8 for
+        the main camera or {field: (N, H, W, 3)} for every camera the model reads; `states`
+        (N, dim) raw goal proprio when the model reads it."""
+        if not isinstance(images, dict):
+            images = {self.model.field: images}
+        missing = [f for f in self.goal_fields() if f not in images]
+        if missing:
+            raise ValueError(
+                f"{type(self.model).__name__} reads cameras {self.goal_fields()}; the goal "
+                f"lacks {missing}: set eval.goal_images={{field: path}} for each"
+            )
+        self.goal = {f: self._goal_frames(images[f]) for f in self.goal_fields()}
+        proprio = getattr(self.model, "proprio_field", None)
+        if proprio:
+            if states is None:
+                raise ValueError(
+                    f"{type(self.model).__name__} encodes '{proprio}' with the images, so the "
+                    f"goal needs it too: set eval.goal_state=[...] (raw units)"
+                )
+            state = torch.as_tensor(np.asarray(states, dtype=np.float32), device=self.device)
+            state = state.view(state.shape[0], 1, -1)
+            if self.normalizer is not None:
+                state = self.normalizer.normalize(proprio, state)
+            self.goal[proprio] = state
+
+    def _goal_frames(self, images):
+        """(N, H, W, 3) uint8 -> (N, 1, C, H, W) on the device, at the observation size."""
+        image = torch.as_tensor(np.asarray(images)).permute(0, 3, 1, 2)[:, None]
         if self.image_size and image.shape[-2:] != self.image_size:
             flat = F.interpolate(image.flatten(0, 1).float(), size=self.image_size, mode="area")
-            image = flat.round().clamp(0, 255).to(torch.uint8)[None]
-        with torch.no_grad():
-            self.goal_latent = model.encode_frames(image.to(self.device))[:, 0]      # (1, P, D)
+            image = flat.round().clamp(0, 255).to(torch.uint8)[:, None]
+        return image.to(self.device)
+
+    def _chunk_len(self, model):
+        return self.planner.execute_len
+
+    def reset(self, hold_action=None):
+        super().reset(hold_action)
+        planner = getattr(self, "planner", None)
+        if planner is not None:
+            planner.reset()
 
     def _check_model(self, model):
-        if self.action_stream is not None or not hasattr(model, "plan"):
+        if self.action_stream is not None or not hasattr(model, "make_planner"):
             raise ValueError(
                 f"{type(model).__name__} is not a planning world model: it predicts an "
                 f"action chunk, so drive it with ChunkDriver"
@@ -397,10 +475,14 @@ class PlanDriver(ChunkDriver):
     def predict_windows(self, windows, actions_per_env=None):
         started = time.perf_counter()
         obs = self._prepare(windows, actions_per_env)
-        frames = obs[self.model.field]
-        past = obs.get(self.action_context_field) if self.action_context is not None else None
-        goal = self.goal_latent.expand(frames.shape[0], -1, -1)
-        chunk = self.model.plan(frames, goal, past, self.plan_cfg)
+        steps = self.steps_taken if len(windows) == 1 else None
+        goal = self.goal
+        frames = goal[self.model.field]
+        if frames.shape[0] > 1:
+            envs = self.window_envs if self.window_envs is not None else range(len(windows))
+            idx = torch.as_tensor(list(envs), device=frames.device)
+            goal = {k: v.index_select(0, idx) if v.shape[0] > 1 else v for k, v in goal.items()}
+        chunk = self.model.plan(self.planner, obs, goal, steps_taken=steps).to(self.device)
         if self.normalizer is not None:
             chunk = self.normalizer.unnormalize(self.action_field, chunk)
         out = chunk[:, : self.execute_len].cpu().numpy()
@@ -434,6 +516,9 @@ class BatchDriver:
         self._hist = [deque(maxlen=driver.obs_len) for _ in range(self.num_envs)]
         self._acts = [deque(maxlen=driver.action_len) for _ in range(self.num_envs)]
         self._buffer = [deque() for _ in range(self.num_envs)]
+        planner = getattr(driver, "planner", None)
+        if planner is not None:
+            planner.reset()
 
     def _executed(self, env):
         acts = list(self._acts[env])
@@ -455,6 +540,8 @@ class BatchDriver:
                 hist = [hist[0]] * (driver.obs_len - len(hist)) + hist
                 windows.append([hist[driver.obs_len - 1 + o] for o in driver.offsets])
                 executed.append(self._executed(env))
+            if hasattr(driver, "window_envs"):
+                driver.window_envs = replan
             chunks = driver.predict_windows(windows, executed)
             for env, chunk in zip(replan, chunks, strict=True):
                 self._buffer[env].extend(chunk)
@@ -518,7 +605,8 @@ class RemoteDriver(BaseDriver):
             "task": cfg.get("task"),
             "goal": (encode_jpeg(load_goal_image(cfg.goal_image), self.quality)
                      if cfg.get("goal_image") else None),
-            "plan": dict(cfg.get("plan") or {}),
+            "plan": _plain(cfg.get("plan")),
+            "goal_state": list(cfg.goal_state) if cfg.get("goal_state") is not None else None,
             "model_overrides": self._model_overrides(cfg),
             **{knob: cfg.get(knob) for knob in SAMPLING_KNOBS},
         })
@@ -546,7 +634,8 @@ class RemoteDriver(BaseDriver):
         ]
         encoded = time.perf_counter()
         reply = self._request(
-            {"type": "predict", "frames": frames, "actions": list(actions)}
+            {"type": "predict", "frames": frames, "actions": list(actions),
+             "t": getattr(self, "steps_taken", None)}
         )
         # both durations are measured on their own machine's clock, so subtracting
         # them needs no clock agreement between the two

@@ -1,0 +1,13 @@
+# Held-out losses (as `holdout`) plus open-loop planning on held-out windows: plan from a
+# window's first frame toward its last, and compare the executed chunk with the recorded
+# actions. For world models (anything exposing `make_planner`).
+backend: plan_offline
+dataset: ${dataset}
+
+batch_size: 32
+max_batches: 50
+num_workers: 4
+seed: 0
+
+plan_samples: 16       # windows planned per eval; each is a full solve
+plan: {}               # merged over the model's own `plan:` section
