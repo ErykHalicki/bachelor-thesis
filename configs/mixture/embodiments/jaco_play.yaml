@@ -1,0 +1,15 @@
+name: jaco_play
+source: jaco_play
+action:
+  - {from: action, dims: [0, 1, 2], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+  - {name: wrist, from: observation.images.image_wrist, role: wrist, view: wrist}
+proprio:   # eef xyz, three quaternion components (not euler: plain deltas), dim 6 is padding
+  from: observation.state
+  position: [0, 1, 2]
+  other: [3, 4, 5]
+  gripper: [7]

@@ -1,0 +1,11 @@
+name: toto
+source: toto
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: absolute}   # dim 6 is always 0
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+proprio:   # seven joint angles, dim 7 is padding; no gripper
+  from: observation.state
+  other: [0, 1, 2, 3, 4, 5, 6]

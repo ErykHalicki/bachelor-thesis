@@ -1,4 +1,4 @@
-EPISODIC_BACKENDS = {"lerobot", "ocbench"}
+EPISODIC_BACKENDS = {"lerobot", "ocbench", "mixture"}
 
 
 def live_fields(source):
@@ -54,6 +54,9 @@ def build_dataset(cfg, norm_stats_override=None, augment=True, split=None,
     elif backend == "ocbench":
         from .ocbench import OCBenchSource
         source = OCBenchSource(cfg, split=split)
+    elif backend == "mixture":
+        from .mixture.clips import MixtureSource
+        source = MixtureSource(cfg, split=split)
     else:
         raise ValueError(
             f"backend '{backend}' not installed. "

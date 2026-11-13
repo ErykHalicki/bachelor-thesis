@@ -1,0 +1,12 @@
+name: ucsd_pick_place
+source: ucsd_pick_and_place_dataset
+action:
+  - {from: action, dims: [0, 1, 2], kind: delta}
+  - {from: action, dims: [3], kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+proprio:   # semantics undocumented in the conversion: every dim a plain delta
+  from: observation.state
+  other: [0, 1, 2, 3, 4, 5, 6]

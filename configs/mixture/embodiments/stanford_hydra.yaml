@@ -1,0 +1,15 @@
+name: stanford_hydra
+source: stanford_hydra_dataset
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+  - {name: wrist, from: observation.images.wrist_image, role: wrist, view: wrist}
+proprio:   # eef xyz, euler xyz, dim 6 is padding
+  from: observation.state
+  position: [0, 1, 2]
+  rotation: [3, 4, 5]
+  gripper: [7]

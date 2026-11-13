@@ -1,0 +1,30 @@
+# Eight Open-X embodiments (the lerobot/* v3.0 conversions, re-encoded to 224x224 h264 by
+# thesis.datasets.mixture.reencode, manifests by thesis.datasets.mixture.manifest) as
+# RoboJEPA clips: datasets/mixture/clips.py, docs/multi_embodiment_data.md.
+backend: mixture
+data_root: ~/data/oxe/fit320x240   # native aspect, shrunk to fit 320x240, never enlarged
+embodiments_dir: configs/mixture/embodiments
+members:
+  - taco_play
+  - jaco_play
+  - berkeley_fanuc
+  - utaustin_mutex
+  - ucsd_pick_place
+  - stanford_hydra
+  - stanford_robocook
+  - toto
+temperature: 0.5         # member weight ~ hours ** temperature within a view group
+weights: {}              # per-member multipliers on top
+fps: 5                   # world-model rate; an embodiment's `wm_fps` overrides it
+frames_per_clip: 16
+min_frames: 4            # RoboJEPA's min_length_to_drop
+pad_size: ${algorithm.pad_size}
+view_groups: {1: 0.5, 2: 0.5}   # clip share per camera count, RoboJEPA's 50/50 split
+image_size: [240, 320]
+random_resized_crop: {scale: [0.5, 1.0], ratio: [1.333, 1.777]}
+val_windows_per_member: 64
+epoch_size: 100000       # samples per DataLoader pass; clips are drawn, not enumerated
+seed: 0
+
+conditioning: ${algorithm.conditioning}
+predict: ${algorithm.predict}

@@ -1,0 +1,14 @@
+name: utaustin_mutex
+source: utaustin_mutex
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+  - {name: wrist, from: observation.images.wrist_image, role: wrist, view: wrist}
+proprio:   # seven joint angles and gripper width
+  from: observation.state
+  other: [0, 1, 2, 3, 4, 5, 6]
+  gripper: [7]

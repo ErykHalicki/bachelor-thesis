@@ -1,0 +1,15 @@
+name: taco_play
+source: taco_play
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: static, from: observation.images.rgb_static, role: exterior, view: default}
+  - {name: gripper, from: observation.images.rgb_gripper, role: wrist, view: wrist}
+proprio:   # tcp xyz, tcp euler xyz, gripper width
+  from: observation.state
+  position: [0, 1, 2]
+  rotation: [3, 4, 5]
+  gripper: [6]

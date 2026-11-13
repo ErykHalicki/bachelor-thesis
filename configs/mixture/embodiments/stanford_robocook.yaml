@@ -1,0 +1,17 @@
+name: stanford_robocook
+source: stanford_robocook
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: cam_1, from: observation.images.image_1, role: exterior, view: default}
+  - {name: cam_2, from: observation.images.image_2, role: exterior, view: default}
+  - {name: cam_3, from: observation.images.image_3, role: exterior, view: default}
+  - {name: cam_4, from: observation.images.image_4, role: exterior, view: default}
+proprio:   # eef xyz, euler xyz, dim 6 is padding
+  from: observation.state
+  position: [0, 1, 2]
+  rotation: [3, 4, 5]
+  gripper: [7]

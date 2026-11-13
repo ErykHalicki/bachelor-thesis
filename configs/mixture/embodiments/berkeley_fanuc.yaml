@@ -1,0 +1,14 @@
+name: berkeley_fanuc
+source: berkeley_fanuc_manipulation
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: front, from: observation.images.image, role: exterior, view: default}
+  - {name: wrist, from: observation.images.wrist_image, role: wrist, view: wrist}
+proprio:   # six joint angles, dim 6 is padding
+  from: observation.state
+  other: [0, 1, 2, 3, 4, 5]
+  gripper: [7]
