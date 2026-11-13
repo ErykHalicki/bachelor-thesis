@@ -1,0 +1,46 @@
+# Open-X datasets converted from the source RLDS (gs://gresearch/robotics) into LeRobot v3
+# by scripts/local/oxe_download_all.sbatch: the 40 that passed the 2026-11-13 source audit
+# (real robot, actions and state present and varying, not simulation, >= 5 Hz). Smallest
+# download first, DROID last. `fps` is the spreadsheet's control frequency (RLDS stores
+# none); `gb` is the download size, for the record.
+datasets:
+  - {name: utokyo_xarm_bimanual_converted_externally_to_rlds, fps: 10, gb: 0.1}
+  - {name: tokyo_u_lsmo_converted_externally_to_rlds, fps: 10, gb: 0.4}
+  - {name: utokyo_pr2_opening_fridge_converted_externally_to_rlds, fps: 10, gb: 0.4}
+  - {name: cmu_stretch, fps: 10, gb: 0.8}
+  - {name: asu_table_top_converted_externally_to_rlds, fps: 12.5, gb: 0.8}
+  - {name: utokyo_pr2_tabletop_manipulation_converted_externally_to_rlds, fps: 10, gb: 0.9}
+  - {name: utokyo_xarm_pick_and_place_converted_externally_to_rlds, fps: 10, gb: 1.4}
+  - {name: austin_buds_dataset_converted_externally_to_rlds, fps: 20, gb: 1.6}
+  - {name: dlr_sara_grid_clamp_converted_externally_to_rlds, fps: 10, gb: 1.8}
+  - {name: columbia_cairlab_pusht_real, fps: 10, gb: 3.0}
+  - {name: dlr_sara_pour_converted_externally_to_rlds, fps: 10, gb: 3.1}
+  - {name: dlr_edan_shared_control_converted_externally_to_rlds, fps: 5, gb: 3.3}
+  - {name: berkeley_cable_routing, fps: 10, gb: 5.0}
+  - {name: austin_sirius_dataset_converted_externally_to_rlds, fps: 20, gb: 7.0}
+  - {name: cmu_play_fusion, fps: 5, gb: 7.2}
+  - {name: berkeley_fanuc_manipulation, fps: 10, gb: 9.5}
+  - {name: jaco_play, fps: 10, gb: 9.9}
+  - {name: viola, fps: 20, gb: 11.2}
+  - {name: kaist_nonprehensile_converted_externally_to_rlds, fps: 10, gb: 12.6}
+  - {name: conq_hose_manipulation, fps: 30, gb: 13.0}
+  - {name: berkeley_mvp_converted_externally_to_rlds, fps: 5, gb: 13.3}
+  - {name: austin_sailor_dataset_converted_externally_to_rlds, fps: 20, gb: 20.2}
+  - {name: utaustin_mutex, fps: 20, gb: 22.3}
+  - {name: mimic_play, fps: 15, gb: 32.5}
+  - {name: stanford_kuka_multimodal_dataset_converted_externally_to_rlds, fps: 20, gb: 34.3}
+  - {name: berkeley_rpt_converted_externally_to_rlds, fps: 30, gb: 43.6}
+  - {name: taco_play, fps: 15, gb: 51.3}
+  - {name: iamlab_cmu_pickup_insert_converted_externally_to_rlds, fps: 20, gb: 54.0}
+  - {name: bc_z, fps: 10, gb: 54.1}
+  - {name: stanford_hydra_dataset_converted_externally_to_rlds, fps: 10, gb: 77.8}
+  - {name: berkeley_autolab_ur5, fps: 5, gb: 82.0}
+  - {name: aloha_mobile, fps: 50, gb: 98.5}
+  - {name: furniture_bench_dataset_converted_externally_to_rlds, fps: 10, gb: 123.5}
+  - {name: stanford_robocook_converted_externally_to_rlds, fps: 5, gb: 133.8}
+  - {name: toto, fps: 30, gb: 137.1}
+  - {name: robo_set, fps: 5, gb: 191.8}
+  - {name: bridge, fps: 5, gb: 416.1}
+  - {name: language_table, fps: 10, gb: 429.4}
+  - {name: fmb, fps: 10, gb: 1285.7}
+  - {name: droid, fps: 15, gb: 1866.0}

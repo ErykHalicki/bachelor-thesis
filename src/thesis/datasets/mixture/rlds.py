@@ -27,7 +27,11 @@ RLDS stores no frame rate, so `--fps` is required: the control frequency from th
 dataset spreadsheet. Episodes keep the source's split, in order (train first), in
 info.json `splits` and the episode table's `rlds.split` column.
 
-A run that stops part-way is restarted from scratch for that dataset (`--overwrite`).
+A finished dataset (meta/info.json, no .progress.json) is skipped. A run that stops part-way
+resumes: every `--checkpoint-gb` of downloaded shards the open video and data files are
+closed and the converter's state is saved to <out>/.progress.json; a restart continues from
+the next shard and deletes whatever was written after that checkpoint. `--overwrite` starts
+the dataset over.
 """
 
 import argparse
@@ -355,10 +359,16 @@ class DataWriter:
         pq.write_table(pa.concat_tables(self.parts), path)
         self.parts, self.nbytes = [], 0
 
+    def checkpoint(self):
+        """Write out the open file; the next episode starts a new one."""
+        self.flush()
+        self.fresh = True
+
     def write_episode(self, table):
-        if self.file_index < 0 or self.nbytes > self.max_bytes:
+        if self.file_index < 0 or self.nbytes > self.max_bytes or getattr(self, "fresh", False):
             self.flush()
             self.file_index += 1
+            self.fresh = False
         self.parts.append(table)
         self.nbytes += table.nbytes
         return divmod(self.file_index, self.chunks_size)
@@ -387,8 +397,9 @@ def _feature_entry(dtype, shape, fps):
 
 class Converter:
     def __init__(self, name, out, tmp, fps, fit=(320, 240), encoder="h264_nvenc", cq=20,
-                 gop=2, max_dim=256, max_episodes=None, decode_threads=8,
-                 video_mb=500, data_mb=100, chunks_size=1000, version=None, shards=None):
+                 gop=2, max_dim=512, max_episodes=None, decode_threads=8,
+                 video_mb=500, data_mb=100, chunks_size=1000, version=None, shards=None,
+                 checkpoint_gb=4.0):
         self.name, self.fps, self.fit = name, float(fps), fit
         short = name.removesuffix("_converted_externally_to_rlds")
         self.out, self.tmp = Path(out).expanduser() / short, Path(tmp).expanduser() / short
@@ -397,6 +408,7 @@ class Converter:
         self.pool = ThreadPoolExecutor(decode_threads)
         self.video_mb, self.data_mb, self.chunks_size = video_mb, data_mb, chunks_size
         self._version, self._shards = version, shards
+        self.checkpoint_bytes = checkpoint_gb * 1e9
 
     # one camera's frames of one episode, decoded and resized in parallel
     def _frames(self, writer, blobs):
@@ -414,11 +426,24 @@ class Converter:
             one(blobs[0])
         return np.stack(list(self.pool.map(one, blobs)))
 
+    @property
+    def progress_path(self):
+        return self.out / ".progress.json"
+
+    def finished(self):
+        return (self.out / "meta/info.json").exists() and not self.progress_path.exists()
+
     def run(self, overwrite=False):
-        if self.out.exists():
-            if not overwrite:
-                raise SystemExit(f"{self.out} exists; pass --overwrite to redo it")
+        if overwrite and self.out.exists():
             shutil.rmtree(self.out)
+        if self.finished():
+            print(f"{self.name}: already converted, skipping", flush=True)
+            return self.out
+        state = None
+        if self.progress_path.exists():
+            state = json.loads(self.progress_path.read_text())
+        elif self.out.exists():
+            shutil.rmtree(self.out)        # died before its first checkpoint
         self.tmp.mkdir(parents=True, exist_ok=True)
         ver, shards = (self._version, self._shards) if self._version else find_version(self.name)
         base = f"{GCS}/{BUCKET}/{ver}"
@@ -433,8 +458,23 @@ class Converter:
                                  self.gop, self.video_mb, self.chunks_size) for c in p["cameras"]}
         data = DataWriter(self.out, self.data_mb, self.chunks_size)
         episodes, tasks, splits = [], {}, {}
-        index = 0
-        t0, nbytes = time.time(), 0
+        index, first_shard = 0, 0
+        if state is not None:
+            if state["source"] != ver or state["shards"] != len(shards):
+                raise SystemExit(f"{self.out}: progress is for {state['source']} with "
+                                 f"{state['shards']} shards; pass --overwrite to start over")
+            episodes, index, first_shard = state["episodes"], state["index"], state["shards_done"]
+            tasks = {t: i for t, i in state["tasks"]}
+            splits = {k: list(v) for k, v in state["splits"].items()}
+            for cam, w in videos.items():
+                saved = state["videos"][cam]
+                w.file_index, w.size = saved["file_index"], tuple(saved["size"]) if saved["size"] else None
+                w.files = [(Path(f), n) for f, n in saved["files"]]
+            data.file_index, data.fresh = state["data_file_index"], True
+            self._drop_after_checkpoint(videos, data)
+            print(f"{self.name}: resuming at shard {first_shard + 1}/{len(shards)} with "
+                  f"{len(episodes)} episodes", flush=True)
+        t0, nbytes, since = time.time(), 0, 0
 
         prefetch = {}
 
@@ -444,10 +484,11 @@ class Converter:
             return download(obj, dst)
 
         dl = ThreadPoolExecutor(1)
-        if shards:
-            prefetch[0] = dl.submit(fetch, 0)
+        if first_shard < len(shards):
+            prefetch[first_shard] = dl.submit(fetch, first_shard)
         done = False
-        for si, obj in enumerate(shards):
+        for si in range(first_shard, len(shards)):
+            obj = shards[si]
             path = prefetch.pop(si).result()
             if si + 1 < len(shards) and not done:
                 prefetch[si + 1] = dl.submit(fetch, si + 1)
@@ -466,12 +507,17 @@ class Converter:
                     done = True
                     break
             nbytes += int(obj["size"])
+            since += int(obj["size"])
             path.unlink()
             rate = nbytes / max(time.time() - t0, 1e-9) / 1e6
             print(f"{self.name}: shard {si + 1}/{len(shards)} ({split}) -> {len(episodes)} "
                   f"episodes, {index} frames, {rate:.1f} MB/s", flush=True)
             if done:
                 break
+            if since >= self.checkpoint_bytes and si + 1 < len(shards):
+                self._checkpoint(ver, len(shards), si + 1, videos, data, episodes, tasks,
+                                 splits, index)
+                since = 0
         for fut in prefetch.values():
             try:
                 fut.result().unlink()
@@ -483,8 +529,39 @@ class Converter:
         data.flush()
         self._check_videos(videos, episodes)
         self._write_meta(p, videos, episodes, tasks, splits, index, ver, info_src)
+        self.progress_path.unlink(missing_ok=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
         return self.out
+
+    def _checkpoint(self, ver, n_shards, shards_done, videos, data, episodes, tasks, splits,
+                    index):
+        for w in videos.values():
+            w.close()
+        data.checkpoint()
+        state = {
+            "source": ver, "shards": n_shards, "shards_done": shards_done, "index": index,
+            "episodes": episodes, "tasks": list(tasks.items()), "splits": splits,
+            "data_file_index": data.file_index,
+            "videos": {cam: {"file_index": w.file_index, "size": list(w.size) if w.size else None,
+                             "files": [(str(f), n) for f, n in w.files]}
+                       for cam, w in videos.items()},
+        }
+        tmp = self.progress_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, default=lambda o: o.item() if hasattr(o, "item") else str(o)))
+        tmp.replace(self.progress_path)
+
+    def _drop_after_checkpoint(self, videos, data):
+        """Delete the files a crashed run wrote after its last checkpoint."""
+        def index_of(path):
+            return int(path.parent.name.split("-")[1]) * self.chunks_size + \
+                int(path.stem.split("-")[1])
+        for path in (self.out / "data").rglob("*.parquet"):
+            if index_of(path) > data.file_index:
+                path.unlink()
+        for w in videos.values():
+            for path in (self.out / "videos" / w.key).rglob("*.mp4"):
+                if index_of(path) > w.file_index:
+                    path.unlink()
 
     def _episode(self, rec, p, videos, data, ep_index, start, tasks):
         feats = example_features(rec)
@@ -607,14 +684,17 @@ def main():
     ap.add_argument("--encoder", default="h264_nvenc")
     ap.add_argument("--cq", type=int, default=20)
     ap.add_argument("--gop", type=int, default=2)
-    ap.add_argument("--max-dim", type=int, default=256)
+    ap.add_argument("--max-dim", type=int, default=512)
     ap.add_argument("--max-episodes", type=int, default=None, help="stop early (testing)")
     ap.add_argument("--decode-threads", type=int, default=8)
-    ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--checkpoint-gb", type=float, default=4.0,
+                    help="save resumable progress after this much downloaded data")
+    ap.add_argument("--overwrite", action="store_true", help="start the dataset over")
     a = ap.parse_args()
     fit = tuple(int(v) for v in a.fit.lower().split("x"))
     out = Converter(a.name, a.out, a.tmp, a.fps, fit, a.encoder, a.cq, a.gop, a.max_dim,
-                    a.max_episodes, a.decode_threads).run(a.overwrite)
+                    a.max_episodes, a.decode_threads,
+                    checkpoint_gb=a.checkpoint_gb).run(a.overwrite)
     print(f"wrote {out}")
 
 

@@ -103,24 +103,32 @@ def _write_shard(path, eps):
 SOURCE_EP = [0, 1, 0]
 
 
-@pytest.fixture
-def converted(tmp_path, monkeypatch):
+def _source(tmp_path, monkeypatch, lengths):
     rng = np.random.default_rng(0)
     src = tmp_path / "src"
-    src.mkdir()
-    lengths = [[7, 4], [9]]
+    src.mkdir(exist_ok=True)
     shards = []
     for i, ls in enumerate(lengths):
-        name = f"robotics/toy/0.1.0/toy-train.tfrecord-{i:05d}-of-00002"
+        name = f"robotics/toy/0.1.0/toy-train.tfrecord-{i:05d}-of-{len(lengths):05d}"
         _write_shard(src / name.rsplit("/", 1)[-1], _episodes(rng, ls))
         shards.append({"name": name, "size": (src / name.rsplit("/", 1)[-1]).stat().st_size})
     monkeypatch.setattr(rlds, "_get", lambda url, *a, **k: json.dumps(
         FEATURES if url.endswith("features.json") else {"description": "toy"}).encode())
     monkeypatch.setattr(rlds, "download", lambda obj, dst: shutil.copy(
         src / obj["name"].rsplit("/", 1)[-1], dst) and dst)
-    out = rlds.Converter("toy", tmp_path / "out", tmp_path / "tmp", fps=5, fit=(32, 32),
-                         encoder="libx264", cq=10, version="robotics/toy/0.1.0/",
-                         shards=shards).run()
+    return shards
+
+
+def _converter(tmp_path, shards, out="out", **kw):
+    return rlds.Converter("toy", tmp_path / out, tmp_path / "tmp", fps=5, fit=(32, 32),
+                          encoder="libx264", cq=10, version="robotics/toy/0.1.0/",
+                          shards=shards, **kw)
+
+
+@pytest.fixture
+def converted(tmp_path, monkeypatch):
+    lengths = [[7, 4], [9]]
+    out = _converter(tmp_path, _source(tmp_path, monkeypatch, lengths)).run()
     return out, sum(lengths, [])
 
 
@@ -158,3 +166,49 @@ def test_tasks_and_metadata(converted):
     assert [e["tasks"] for e in eps] == [["task 0"], ["task 1"], ["task 0"]]
     assert eps[2]["meta.episode_metadata.file_path"] == "/data/ep0.h5"
     assert [e["rlds.record"] for e in eps] == [0, 1, 0]
+
+
+def test_a_crashed_run_resumes_from_its_last_checkpoint(tmp_path, monkeypatch):
+    """A crash part-way through shard 3 leaves files written after the shard-2 checkpoint;
+    the rerun deletes them, continues at shard 3, and matches an uninterrupted run."""
+    import pyarrow.parquet as pq
+
+    shards = _source(tmp_path, monkeypatch, [[7, 4], [9], [5, 6]])
+    clean = _converter(tmp_path, shards, out="clean", checkpoint_gb=0).run()
+
+    real = rlds.Converter._episode
+
+    def crash_at_episode_4(self, rec, p, videos, data, ep_index, *a):
+        if ep_index == 4:
+            raise RuntimeError("simulated crash")
+        return real(self, rec, p, videos, data, ep_index, *a)
+
+    monkeypatch.setattr(rlds.Converter, "_episode", crash_at_episode_4)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _converter(tmp_path, shards, out="resumed", checkpoint_gb=0).run()
+    partial = tmp_path / "resumed/toy"
+    assert (partial / ".progress.json").exists()
+    monkeypatch.setattr(rlds.Converter, "_episode", real)
+    resumed = _converter(tmp_path, shards, out="resumed", checkpoint_gb=0).run()
+
+    assert not (resumed / ".progress.json").exists()
+    a, b = LeRobotV3Source(clean), LeRobotV3Source(resumed)
+    assert list(a.lengths) == list(b.lengths) == [7, 4, 9, 5, 6]
+    np.testing.assert_array_equal(a.column("observation.state"), b.column("observation.state"))
+    for e, T in enumerate(a.lengths):
+        x = a.frames("observation.images.image", e, list(range(T))).float()
+        y = b.frames("observation.images.image", e, list(range(T))).float()
+        assert (x - y).abs().mean() < 1.0
+    ea = pq.read_table(clean / "meta/episodes/chunk-000/file-000.parquet").to_pylist()
+    eb = pq.read_table(resumed / "meta/episodes/chunk-000/file-000.parquet").to_pylist()
+    assert [e["rlds.shard"] for e in ea] == [e["rlds.shard"] for e in eb]
+    # one data file per checkpointed span, nothing left over from the crash
+    assert len(list((resumed / "data").rglob("*.parquet"))) == 3
+
+
+def test_a_finished_dataset_is_skipped(converted, monkeypatch):
+    out, _ = converted
+    stamp = (out / "meta/info.json").stat().st_mtime_ns
+    monkeypatch.setattr(rlds, "download", lambda *a: pytest.fail("downloaded again"))
+    rlds.Converter("toy", out.parent, out.parent.parent / "tmp", fps=5).run()
+    assert (out / "meta/info.json").stat().st_mtime_ns == stamp
