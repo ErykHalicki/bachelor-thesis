@@ -94,6 +94,22 @@ def resolve_slice(patterns, names, field):
     return selected
 
 
+def _arrow_column(hf, col):
+    """One numeric column of a Hugging Face dataset as an (N, dim) array, straight off its
+    Arrow table. `with_format("numpy")[col]` formats it row by row, which costs minutes on a
+    few million rows; this is one contiguous conversion. Honors a `select`ed index map."""
+    import pyarrow as pa
+
+    arr = hf.data.column(col)
+    if hf._indices is not None:
+        arr = arr.take(hf._indices.column(0))
+    arr = arr.combine_chunks()
+    if pa.types.is_fixed_size_list(arr.type) or pa.types.is_list(arr.type):
+        flat = arr.flatten().to_numpy(zero_copy_only=False)
+        return flat.reshape(len(arr), -1)
+    return arr.to_numpy(zero_copy_only=False).reshape(len(arr), -1)
+
+
 class LeRobotSource(BaseSource):
     """Expert demonstrations via a LeRobot v3.0 dataset, windowed by the temporal
     index spec (`cfg.conditioning` / `cfg.predict`, see utils/spec.py). Each spec entry
@@ -126,7 +142,11 @@ class LeRobotSource(BaseSource):
       slices         `{from_key: patterns}` keeping only some dimensions of a flat column,
                      named by the dataset's per-dimension feature names (e.g. `"*.pos"`,
                      `"gripper.pos, *.vel"`).
-      image_size     `[H, W]` to resize visual streams to; null keeps native size.
+      image_size     `[H, W]` the visual streams must be stored at; null keeps native size.
+                     A dataset stored at another resolution is refused: re-encode it to
+                     image_size first (thesis.scripts.reencode_dataset), since resizing
+                     every frame in the loader starves the GPU.
+      allow_resize   resize on the fly instead of refusing, with a warning (default false).
       return_uint8   uint8 [0,255] images (default); false gives float [0,1].
       drop_boundary  drop decision points whose window would run past the end of its
                      episode (default true). The start of an episode is never dropped:
@@ -223,6 +243,7 @@ class LeRobotSource(BaseSource):
         self._field_to_col = field_to_col
         self._visual = visual
         self.provided_modalities = set(field_to_col) | set(field_to_col.values())
+        self._check_stored_resolution(features, bool(cfg.get("allow_resize", False)))
 
         self._slices = {}
         for field, patterns in slices.items():
@@ -303,6 +324,39 @@ class LeRobotSource(BaseSource):
         self._plain_ds = None
         self._ds_pid = None
 
+    def _check_stored_resolution(self, features, allow_resize):
+        """Refuse a dataset whose videos are not stored at `image_size`.
+
+        Every sample would otherwise decode full-size frames and resize them on the CPU in
+        the loader workers, which is what starved the GPU on the b601 ZED data (54% data
+        wait). Re-encoding once at the target resolution removes that from every step.
+        `allow_resize: true` accepts the cost and warns instead.
+        """
+        if not self._image_size:
+            return
+        mismatched = {}
+        for field in sorted(self._visual):
+            col = self._field_to_col[field]
+            shape = tuple(int(v) for v in features[col].get("shape", ())[:2])
+            if shape and shape != self._image_size:
+                mismatched[col] = shape
+        if not mismatched:
+            return
+        target = f"{self._image_size[0]}x{self._image_size[1]}"
+        stored = ", ".join(f"{col} is {h}x{w}" for col, (h, w) in mismatched.items())
+        advice = (
+            f"'{self._repo_id}' stores {stored}, but image_size is {target}, so every training "
+            f"frame would be decoded at full size and resized on the CPU, which bottlenecks "
+            f"dataloading. Re-encode the dataset to {target} first for fast dataloading "
+            f"(python -m thesis.scripts.reencode_dataset {self._repo_id} --scale "
+            f"{max(self._image_size)}), or point image_size at the stored resolution."
+        )
+        if not allow_resize:
+            raise ValueError(advice + " Set dataset.allow_resize=true to resize on the fly anyway.")
+        import warnings
+
+        warnings.warn(f"resizing on the fly (allow_resize=true): {advice}", stacklevel=2)
+
     def stats_columns(self, keys):
         """`keys` as flat per-frame arrays over this split's episodes, sliced exactly like
         the served data. None when any key is not a plain parquet column.
@@ -321,8 +375,7 @@ class LeRobotSource(BaseSource):
             col = self._field_to_col.get(key, self._columns.get(key, key))
             if col in self._visual or col not in hf.column_names:
                 return None
-            values = np.asarray(hf.with_format("numpy")[col])
-            values = values.reshape(len(values), -1)
+            values = _arrow_column(hf, col)
             dims = self._slices.get(key)
             if dims is not None:
                 values = values[:, dims.numpy()]

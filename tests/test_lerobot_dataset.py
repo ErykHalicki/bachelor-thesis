@@ -217,6 +217,7 @@ def test_goal_frame_joins_a_resized_visual_window(image_dataset_root):
         "repo_id": "test/fake_cam",
         "root": str(image_dataset_root),
         "image_size": [4, 5],
+        "allow_resize": True,
         "conditioning": {"observation.image": {"index": "-1..0, last"}},
         "predict": {"action": {"index": "0..1"}},
     })
@@ -370,3 +371,28 @@ def test_any_percentile_pair_is_available(dataset_root):
         )
     )
     assert len(dataset.stats["action"]["q_lo"]) == len(ACTION_NAMES)
+
+
+def _resize_cfg(root, **over):
+    return OmegaConf.create({
+        "backend": "lerobot", "repo_id": "test/fake_cam", "root": str(root),
+        "conditioning": {"observation.image": {"index": "0"}},
+        "predict": {"action": {"index": "0..1"}}, **over,
+    })
+
+
+def test_a_dataset_stored_at_another_resolution_is_refused(image_dataset_root):
+    with pytest.raises(ValueError, match="Re-encode the dataset to 4x5"):
+        build_dataset(_resize_cfg(image_dataset_root, image_size=[4, 5]))
+
+
+def test_allow_resize_resizes_with_a_warning(image_dataset_root):
+    with pytest.warns(UserWarning, match="Re-encode the dataset to 4x5 first"):
+        ds = build_dataset(_resize_cfg(image_dataset_root, image_size=[4, 5], allow_resize=True))
+    assert ds[0]["observation.image"].shape[-2:] == (4, 5)
+
+
+def test_image_size_matching_storage_needs_no_flag(image_dataset_root):
+    stored = build_dataset(_resize_cfg(image_dataset_root))[0]["observation.image"].shape[-2:]
+    ds = build_dataset(_resize_cfg(image_dataset_root, image_size=list(stored)))
+    assert ds[0]["observation.image"].shape[-2:] == stored
