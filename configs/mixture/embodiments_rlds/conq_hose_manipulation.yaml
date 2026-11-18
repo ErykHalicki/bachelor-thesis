@@ -1,0 +1,10 @@
+name: conq_hose_manipulation
+source: conq_hose_manipulation
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: frontleft_fisheye_image, from: observation.images.frontleft_fisheye_image, role: primary, view: left}
+  - {name: frontright_fisheye_image, from: observation.images.frontright_fisheye_image, role: exterior, view: right}
+  - {name: hand_color_image, from: observation.images.hand_color_image, role: wrist, view: wrist}

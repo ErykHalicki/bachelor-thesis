@@ -1,0 +1,15 @@
+# Flow-Policy: the action chunk enters as noise x_t and leaves as a velocity; 10 Euler
+# steps at inference. The masked MSE on the velocity is the loss.
+defaults:
+  - oxe_policy_common
+  - _self_
+
+num_flow_steps: 10
+
+predict:
+  action:
+    type: flow
+    token_in: {type: mlp, mlp_dim: 512}
+
+losses:
+  - {type: flow, stream: action, weight: 1.0}

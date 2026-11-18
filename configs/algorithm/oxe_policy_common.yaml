@@ -1,0 +1,78 @@
+# Shared body of the three Open-X policy baselines (oxe_policy_{mse,flow,ht}), ~50M
+# parameters trained from scratch, identical but for how the action chunk is produced:
+#
+#   image   the `primary` camera at step 0, 128x160, through a from-scratch ViT
+#           (384 wide, 6 deep, 16 px patches): an 8x10 grid of tokens into the trunk
+#   state   the recorded state at step 0, zero-padded to `pad_size`, through one linear
+#           projection per embodiment: one token
+#   trunk   DiT, 512 wide, 6 deep, 8 heads, unmasked attention over the 81 context tokens
+#           and the 8 action tokens
+#   action  8 steps at 5 Hz, each the K native commands behind it (dataset
+#           oxe_rlds_policy), `pad_size` wide; `action_valid` drops the padded dims and
+#           `step_valid` the steps past an episode end from every loss
+name: generic_vit_predictor
+
+pad_size: 160            # widest step: aloha_mobile, 10 commands x 16 dims at 50 fps
+num_embodiments: 48      # table size; the mixture's 40 ids stay below it
+model_dim: 512
+vision_dim: 384
+policy_fps: 5
+action_index: "0..7"
+
+encoders:
+  vit:
+    type: vit
+    pooling: grid
+    dim: ${algorithm.vision_dim}
+    patch_size: 16
+    depth: 6
+    num_heads: 6
+    mlp_ratio: 4.0
+    img_size: [128, 160]
+    attend_across_time: false
+    rope:
+      height: {share: 0.5, period: auto}
+      width:  {share: 0.5, period: auto}
+  state_proj:
+    type: embodiment_linear
+    in_dim: ${algorithm.pad_size}
+    out_dim: ${algorithm.model_dim}
+    num: ${algorithm.num_embodiments}
+    field: embodiment_id
+
+conditioning:
+  image:
+    from: observation.images
+    encoder: vit
+    dim: ${algorithm.vision_dim}
+    index: "0"
+    fps: ${algorithm.policy_fps}
+    grid: [8, 10]
+  state:
+    from: observation.state
+    encoder: state_proj
+    dim: ${algorithm.model_dim}
+    index: "0"
+    fps: ${algorithm.policy_fps}
+    token_in: {type: identity}
+
+predict:
+  action:
+    from: action
+    role: action
+    dim: ${algorithm.pad_size}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.policy_fps}
+    valid: {steps: step_valid, dims: action_valid}
+    token_out: {type: mlp, mlp_dim: 512}
+
+model:
+  model_dim: ${algorithm.model_dim}
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  rope:
+    time:   {share: 0.5, period: auto}
+    height: {share: 0.25, period: auto}
+    width:  {share: 0.25, period: auto}

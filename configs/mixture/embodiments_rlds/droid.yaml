@@ -1,0 +1,12 @@
+name: droid
+source: droid
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: absolute}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.cartesian_position}
+  - {from: observation.gripper_position}
+cameras:
+  - {name: exterior_image_1_left, from: observation.images.exterior_image_1_left, role: primary, view: left}
+  - {name: exterior_image_2_left, from: observation.images.exterior_image_2_left, role: exterior, view: right}
+  - {name: wrist_image_left, from: observation.images.wrist_image_left, role: wrist, view: wrist}

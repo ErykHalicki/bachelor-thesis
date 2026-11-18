@@ -1,0 +1,9 @@
+name: iamlab_cmu_pickup_insert
+source: iamlab_cmu_pickup_insert
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: wrist_image, from: observation.images.wrist_image, role: wrist, view: wrist}

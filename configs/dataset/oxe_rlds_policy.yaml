@@ -1,0 +1,72 @@
+# All 40 Open-X RLDS conversions (scripts/oxe/convert_rlds_all.py, ~/data/oxe/rlds) as
+# policy samples: one `primary` camera frame and the recorded state at step 0, the next
+# `frames_per_clip` steps of commanded actions at 5 Hz, each step the K = fps / 5 native
+# commands behind it flattened and zero-padded to `pad_size`. `action_valid` marks the
+# dims an embodiment fills, so no loss counts the padding. Embodiment files:
+# configs/mixture/embodiments_rlds. Manifests (once, after any embodiment edit):
+#
+#   python -m thesis.datasets.mixture.manifest --config configs/dataset/oxe_rlds_policy.yaml
+backend: mixture
+data_root: ~/data/oxe/rlds
+embodiments_dir: configs/mixture/embodiments_rlds
+members:
+  - aloha_mobile
+  - asu_table_top
+  - austin_buds_dataset
+  - austin_sailor_dataset
+  - austin_sirius_dataset
+  - bc_z
+  - berkeley_autolab_ur5
+  - berkeley_cable_routing
+  - berkeley_fanuc_manipulation
+  - berkeley_mvp
+  - berkeley_rpt
+  - bridge
+  - cmu_play_fusion
+  - cmu_stretch
+  - columbia_cairlab_pusht_real
+  - conq_hose_manipulation
+  - dlr_edan_shared_control
+  - dlr_sara_grid_clamp
+  - dlr_sara_pour
+  - droid
+  - fmb
+  - furniture_bench_dataset
+  - iamlab_cmu_pickup_insert
+  - jaco_play
+  - kaist_nonprehensile
+  - language_table
+  - mimic_play
+  - robo_set
+  - stanford_hydra_dataset
+  - stanford_kuka_multimodal_dataset
+  - stanford_robocook
+  - taco_play
+  - tokyo_u_lsmo
+  - toto
+  - utaustin_mutex
+  - utokyo_pr2_opening_fridge
+  - utokyo_pr2_tabletop_manipulation
+  - utokyo_xarm_bimanual
+  - utokyo_xarm_pick_and_place
+  - viola
+temperature: 0.5         # member weight ~ hours ** temperature
+weights: {}
+fps: 5                   # policy step rate; K = fps_native / 5 commands per step
+frames_per_clip: 8       # the predicted chunk's steps
+min_frames: 4
+pad_size: ${algorithm.pad_size}
+view_groups: {1: 1.0}
+camera_roles: {1: [primary]}
+normalize_per_embodiment: true
+clock: time              # asu_table_top runs at 12.5 fps: nearest frame, not a ceil stride
+actions: commanded
+state: recorded
+image_size: [128, 160]
+random_resized_crop: {scale: [0.8, 1.0], ratio: [1.2, 1.45]}
+val_windows_per_member: 16
+epoch_size: 1000000
+seed: 0
+
+conditioning: ${algorithm.conditioning}
+predict: ${algorithm.predict}

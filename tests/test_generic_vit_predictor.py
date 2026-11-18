@@ -383,7 +383,10 @@ def test_mlp_token_in_folds_the_timestep_into_the_tokens():
               - layer(x, trunk.t_embedder(torch.ones(2)))).abs().max()
     assert spread > 1e-3
 
-    randomize(algo)
+    # wider than `randomize`: at std 0.02 the stacked blocks wash the token signal below
+    # float32 resolution and every action row is the head's bias path, t or no t
+    for p in algo.parameters():
+        p.data.normal_(0.0, 0.2)
     tokens = {"video_context": torch.randn(2, 3, 32), "action_chunk": x}
     cond = {"action": torch.randn(2, 3, 2)}
     lo = trunk(tokens, torch.zeros(2), cond=cond)
@@ -515,3 +518,19 @@ def test_a_grid_stream_needs_height_width_or_seq_rope(rope, ok):
     else:
         with pytest.raises(AssertionError, match="no `seq` axis"):
             GenericViTTrunk(conditioning, predict, **model)
+
+
+def test_flow_token_in_width_leaves_block_mlp_alone():
+    """A flow stream's `token_in.mlp_dim` sizes its input MLP only; the trunk blocks keep
+    `mlp_ratio * model_dim` (the loop variable once shadowed the blocks' `mlp_dim`)."""
+    from thesis.algorithms.generic_vit_predictor import GenericViTTrunk
+
+    trunk = GenericViTTrunk(
+        {"obs": {"dim": 4, "index": "0"}},
+        {"act": {"type": "flow", "dim": 2, "index": "0..3",
+                 "token_in": {"type": "mlp", "mlp_dim": 8}}},
+        model_dim=32, depth=1, num_heads=4, mlp_ratio=4.0, rope=ROPE,
+    )
+    hidden = {p.shape[0] for n, p in trunk.blocks[0].named_parameters()
+              if n.startswith("mlp.0") and p.ndim == 2}
+    assert hidden == {128}

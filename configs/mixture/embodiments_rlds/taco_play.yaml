@@ -1,0 +1,10 @@
+name: taco_play
+source: taco_play
+action:
+  - {from: action.rel_actions_world, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action.rel_actions_world, dims: [6], kind: discrete}
+state:
+  - {from: observation.robot_obs}
+cameras:
+  - {name: rgb_static, from: observation.images.rgb_static, role: primary, view: default}
+  - {name: rgb_gripper, from: observation.images.rgb_gripper, role: wrist, view: wrist}

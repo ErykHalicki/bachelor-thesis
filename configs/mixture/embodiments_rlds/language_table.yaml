@@ -1,0 +1,8 @@
+name: language_table
+source: language_table
+action:
+  - {from: action, kind: delta}
+state:
+  - {from: observation.effector_translation}
+cameras:
+  - {name: rgb, from: observation.images.rgb, role: primary, view: default}

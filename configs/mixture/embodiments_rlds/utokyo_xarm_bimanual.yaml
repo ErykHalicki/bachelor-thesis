@@ -1,0 +1,9 @@
+name: utokyo_xarm_bimanual
+source: utokyo_xarm_bimanual
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.pose_r}
+  - {from: observation.pose_l}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

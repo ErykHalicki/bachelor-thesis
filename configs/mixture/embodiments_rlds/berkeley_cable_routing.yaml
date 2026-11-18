@@ -1,0 +1,12 @@
+name: berkeley_cable_routing
+source: berkeley_cable_routing
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.rotation_delta, kind: delta}
+state:
+  - {from: observation.robot_state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: top_image, from: observation.images.top_image, role: exterior, view: top}
+  - {name: wrist225_image, from: observation.images.wrist225_image, role: wrist, view: wrist}
+  - {name: wrist45_image, from: observation.images.wrist45_image, role: wrist, view: wrist}

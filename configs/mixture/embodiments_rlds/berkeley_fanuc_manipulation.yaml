@@ -1,0 +1,9 @@
+name: berkeley_fanuc_manipulation
+source: berkeley_fanuc_manipulation
+action:
+  - {from: action, kind: delta}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: wrist_image, from: observation.images.wrist_image, role: wrist, view: wrist}

@@ -1,0 +1,27 @@
+# Training recipe shared by the oxe_policy_* arms. A fixed micro-batch and `data_seed`
+# make every arm draw the same samples in the same order (check with
+# `experiment.batch_digest=<file>`, one sha256 per micro-batch).
+defaults:
+  - base
+  - _self_
+
+batch_size: 64
+effective_batch: null
+data_seed: 0
+max_steps: 100000
+mixed_precision: fp16
+grad_clip: 1.0
+lr_warmup_steps: 1000
+lr_schedule: cosine
+num_workers: 10
+pin_memory: true
+log_every: 50
+eval_every: 5000
+save_every: 5000
+
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.05

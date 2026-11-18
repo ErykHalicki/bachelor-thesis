@@ -1,0 +1,10 @@
+name: jaco_play
+source: jaco_play
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.gripper_closedness_action, kind: discrete}
+state:
+  - {from: observation.end_effector_cartesian_pos}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: image_wrist, from: observation.images.image_wrist, role: wrist, view: wrist}

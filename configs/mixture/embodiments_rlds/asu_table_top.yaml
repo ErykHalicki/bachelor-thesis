@@ -1,0 +1,8 @@
+name: asu_table_top
+source: asu_table_top
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

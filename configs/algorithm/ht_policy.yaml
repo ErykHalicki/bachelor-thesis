@@ -1,0 +1,49 @@
+# A minimal pi(a|o) trained from scratch with heteroscedastic Student-t regression (Zhou
+# et al. 2026): the last two state vectors in as tokens, one learned query token per action
+# step out, read in a single forward pass. A readout token predicts the chunk's residual
+# scale for the `ht` loss and is dropped at inference. Fill the ??? from the dataset:
+#
+#   algorithm=ht_policy algorithm.state_dim=28 algorithm.action_dim=7 \
+#     algorithm.action_index="0..24" algorithm.action_fps=50
+name: generic_vit_predictor
+
+obs_field: observation.state
+state_dim: ???
+action_dim: ???
+action_index: ???        # the predicted chunk, e.g. "0..15" for 16 steps
+action_fps: ???
+
+model:
+  model_dim: 256
+  depth: 4
+  num_heads: 4
+  mlp_ratio: 4.0
+  dropout: 0.0
+  rope:
+    time: {share: 0.75, period: auto}
+    seq:  {share: 0.25, period: auto}
+
+encoders: {}
+
+conditioning:
+  obs:
+    from: ${algorithm.obs_field}
+    dim: ${algorithm.state_dim}
+    index: "-1..0"
+    fps: ${algorithm.action_fps}
+
+predict:
+  action:
+    from: action
+    type: mse
+    query: learned
+    scale: token
+    dim: ${algorithm.action_dim}
+    index: ${algorithm.action_index}
+    fps: ${algorithm.action_fps}
+    token_out:
+      type: mlp
+      mlp_dim: 64
+
+losses:
+  - {type: ht, stream: action, weight: 1.0, nu_ratio: 4.0}

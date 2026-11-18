@@ -1,0 +1,12 @@
+# MSE-Policy: learned query tokens, one forward pass, masked MSE on the action chunk.
+defaults:
+  - oxe_policy_common
+  - _self_
+
+predict:
+  action:
+    type: mse
+    query: learned
+
+losses:
+  - {type: prediction, stream: action, weight: 1.0}

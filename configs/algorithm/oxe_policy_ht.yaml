@@ -1,0 +1,15 @@
+# HT-Policy (Zhou et al. 2026): oxe_policy_mse's network plus one readout token that
+# predicts the chunk's residual scale, trained with the heteroscedastic Student-t NLL
+# (nu = 4d over the chunk's real coordinates). The readout is dropped at inference.
+defaults:
+  - oxe_policy_common
+  - _self_
+
+predict:
+  action:
+    type: mse
+    query: learned
+    scale: token
+
+losses:
+  - {type: ht, stream: action, weight: 1.0, nu_ratio: 4.0}

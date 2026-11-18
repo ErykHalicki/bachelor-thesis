@@ -221,3 +221,29 @@ def test_inverse_softplus_is_exact():
     S, d = torch.tensor([50.0]), torch.tensor([2.0])
     term._calibrate(S, d)
     assert math.isclose(F.softplus(term.scale_bias).item() + 1e-3, 5.0, rel_tol=1e-6)
+
+
+def test_dim_mask_drops_padded_coordinates():
+    """A zero-padded action width counts in no loss: masked MSE is the mean over the real
+    coordinates, and HT's d is their count, as the authors' `mask`."""
+    from thesis.algorithms.losses import PredictionLoss
+
+    torch.manual_seed(6)
+    pred, target = torch.randn(3, 4, 5), torch.randn(3, 4, 5)
+    dims = torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0], [1, 1, 1, 1, 1]], dtype=torch.bool)
+    valid = torch.ones(3, 4, dtype=torch.bool)
+    valid[2, 3] = False
+    ctx = {"pred": {"a": pred}, "target": {"a": target}, "valid": {"a": valid},
+           "dim_valid": {"a": dims}}
+    w = dims[:, None, :] & valid[..., None]
+    mse = PredictionLoss(["a"], 1.0)(ctx)
+    assert torch.allclose(mse, (pred - target).square()[w].mean())
+    padded = target.clone()
+    padded[~dims[:, None, :].expand_as(target)] += 50.0
+    assert torch.allclose(PredictionLoss(["a"], 1.0)({**ctx, "target": {"a": padded}}), mse)
+
+    raw = torch.randn(3, 1)
+    ht = HTLoss("a", 1.0, scale_bias=0.2)(
+        {**ctx, "scale": {"a": raw}})
+    ref = reference_ht(pred, target, raw, None, 0.2, mask=w)
+    assert torch.allclose(ht, ref, atol=1e-6)

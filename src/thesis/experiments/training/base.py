@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import math
 import signal
 import time
@@ -28,6 +29,21 @@ def _release_cuda_cache():
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _append_digest(path, step, micro, batch):
+    """One line per micro-batch: its step, index, and a sha256 over every field's name,
+    dtype, shape and bytes -- `experiment.batch_digest`, to show arms saw the same data."""
+    h = hashlib.sha256()
+    for key in sorted(batch):
+        value = batch[key]
+        if torch.is_tensor(value):
+            t = value.detach().cpu().contiguous()
+            h.update(f"{key}|{t.dtype}|{tuple(t.shape)}|".encode())
+            h.update(t.view(torch.uint8).numpy().tobytes() if t.dtype == torch.bool
+                     else t.numpy().tobytes())
+    with open(path, "a") as f:
+        f.write(f"{step} {micro} {h.hexdigest()}\n")
 
 
 def _improved(value, best, mode):
@@ -79,6 +95,13 @@ class TrainingMixin:
         accum_steps = self._accumulation_steps(acc, batch_size, effective_batch)
 
         num_workers = exp.get("num_workers", 0)
+        # the shuffle order and the workers' base seed come from this generator alone, not
+        # the global RNG, which weight init consumes by an architecture-dependent amount:
+        # two arms with one `data_seed` (default: the run seed) draw identical batches
+        data_seed = exp.get("data_seed", self.root_cfg.get("seed"))
+        generator = None
+        if data_seed is not None:
+            generator = torch.Generator().manual_seed(int(data_seed))
         loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
@@ -87,6 +110,7 @@ class TrainingMixin:
             num_workers=num_workers,
             pin_memory=exp.get("pin_memory", False),
             persistent_workers=num_workers > 0,
+            generator=generator,
         )
         loader = acc.prepare(loader)
         # samples drawn per optimizer step across every rank; a resume restarts the count
@@ -159,10 +183,13 @@ class TrainingMixin:
         window = {}
         data_time = compute_time = aug_time = 0.0
         t_last = time.perf_counter()
+        digest_path = exp.get("batch_digest")
         while not done:
             for batch in loader:
                 t_batch = time.perf_counter()
                 data_time += t_batch - t_last
+                if digest_path and acc.is_main_process:
+                    _append_digest(digest_path, step, micro, batch)
                 if self._batch_augmenter is not None:
                     batch = self._batch_augmenter.apply_batch(batch)
                     # async on CUDA, so this is launch time; the kernels' cost lands in

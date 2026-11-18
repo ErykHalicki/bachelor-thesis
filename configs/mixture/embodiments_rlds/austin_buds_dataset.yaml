@@ -1,0 +1,10 @@
+name: austin_buds_dataset
+source: austin_buds_dataset
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5], kind: delta}
+  - {from: action, dims: [6], kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: wrist_image, from: observation.images.wrist_image, role: wrist, view: wrist}

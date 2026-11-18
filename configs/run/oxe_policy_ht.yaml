@@ -1,0 +1,12 @@
+# @package _global_
+# The ht arm of the Open-X policy baselines (algorithm/oxe_policy_common.yaml):
+#
+#   python main.py run=oxe_policy_ht
+defaults:
+  - override /dataset: oxe_rlds_policy
+  - override /algorithm: oxe_policy_ht
+  - override /eval: holdout
+  - override /experiment: oxe_policy
+
+best_metric: loss/action
+best_mode: min

@@ -13,6 +13,8 @@ anything else, so a term can only ever touch what it is meant to:
                        term asked for the (expensive) differentiable solve
     ctx["valid"]       per predict stream, (B, N) bool target validity, present for streams
                        declaring `valid:` (padded camera slots, steps past an episode end)
+    ctx["dim_valid"]   per predict stream, (B, D) bool coordinate validity, for streams
+                       declaring `valid.dims` (a mixture's zero-padded action width)
     ctx["rollout"]     per `rollout` term label, its autoregressive rollout's per-step
                        (pred, target, valid, copy) tuples
     ctx["copy"]        per `direct` predict stream, its input latent aligned with the
@@ -42,7 +44,7 @@ __all__ = ["SIGReg", "PredictionLoss", "SIGRegLoss", "AEReconLoss", "Integration
            "RolloutLoss", "HTLoss", "masked_error", "build_loss_term"]
 
 
-def masked_error(pred, target, valid=None, norm="mse", per_step=None):
+def masked_error(pred, target, valid=None, norm="mse", per_step=None, dims=None):
     """Mean error between (B, N, D) tensors over the tokens `valid` (B, N) keeps.
 
     The error is averaged over D per token first. `per_step` (tokens per time step) makes
@@ -50,8 +52,19 @@ def masked_error(pred, target, valid=None, norm="mse", per_step=None):
     step's valid tokens, then over the valid steps -- which is how RoboJEPA weighs a
     one-camera and a two-camera clip (each view group is its own rank, averaged per frame).
     Without it, every valid token counts once.
+
+    `dims` (B, D) keeps only the coordinates a sample fills: the error is then the mean
+    over every kept (token, coordinate) pair of the batch, so a padded dim counts nowhere
+    and a sample weighs by its real coordinate count (the HT paper's masked MSE). With
+    every dim kept this equals the unmasked mean.
     """
     err = (pred - target).abs() if norm == "l1" else (pred - target).square()
+    if dims is not None:
+        assert not (per_step and per_step > 1), "dims and per-step reduction do not combine"
+        w = dims.to(err.device).float()[:, None, :].expand_as(err)
+        if valid is not None:
+            w = w * valid.to(err.device).float()[..., None]
+        return (err.float() * w).sum() / w.sum().clamp_min(1)
     err = err.float().mean(-1)
     if valid is None:
         valid = torch.ones_like(err, dtype=torch.bool)
@@ -138,10 +151,12 @@ class PredictionLoss(nn.Module):
         self.step_logs = {}
 
     def _error(self, pred, ctx, n, valid):
-        if self.norm == "mse" and self.reduce == "token" and n not in valid:
+        dims = (ctx.get("dim_valid") or {}).get(n)
+        if self.norm == "mse" and self.reduce == "token" and n not in valid and dims is None:
             return F.mse_loss(pred, ctx["target"][n])
         return masked_error(pred, ctx["target"][n], valid.get(n), self.norm,
-                            self.tokens_per_step.get(n) if self.reduce == "step" else None)
+                            self.tokens_per_step.get(n) if self.reduce == "step" else None,
+                            dims=dims)
 
     def forward(self, ctx):
         """Also keeps, in `step_logs["copy"]`, the same error for predicting each `direct`
@@ -168,7 +183,8 @@ class HTLoss(nn.Module):
         L     = 0.5 (nu + d) log1p(|r|^2 / (nu sigma^2)) + d log sigma
         loss  = sum L / sum d
 
-    d counts the event's valid coordinates (`valid` drops padded steps), nu = `nu_ratio`
+    d counts the event's valid coordinates (`valid` drops padded steps, `dim_valid`
+    padded dims, as the authors' `mask`), nu = `nu_ratio`
     * d unless a fixed `nu` is given (`nu_ratio -> inf` is the heteroscedastic Gaussian).
     The per-element reduction keeps the loss on MSE's scale, so a flow recipe's learning
     rate carries over. Computed in fp32 with autocast off.
@@ -200,22 +216,25 @@ class HTLoss(nn.Module):
         self.register_buffer("calibrated", torch.tensor(not calibrate))
         self.step_logs = {}
 
-    def _events(self, pred, target, valid, raw):
+    def _events(self, pred, target, valid, raw, dims=None):
         """(S, d, raw) per event: squared-residual sum, valid coordinate count, raw scale."""
         err = (pred - target).square()
         B, N, D = err.shape
         w = (torch.ones(B, N, device=err.device, dtype=err.dtype) if valid is None
              else valid.to(device=err.device, dtype=err.dtype))
-        err = err * w.unsqueeze(-1)
+        dw = (torch.ones(B, D, device=err.device, dtype=err.dtype) if dims is None
+              else dims.to(device=err.device, dtype=err.dtype))
+        err = err * w.unsqueeze(-1) * dw.unsqueeze(1)
+        width = dw.sum(1, keepdim=True)
         if raw.shape == (B, 1):
-            return err.sum((1, 2)), w.sum(1) * D, raw[:, 0]
+            return err.sum((1, 2)), w.sum(1) * width[:, 0], raw[:, 0]
         assert raw.shape == (B, N), f"scale is {tuple(raw.shape)}, expected (B, 1) or (B, N)"
         per = self.tokens_per_step
         T = N // per
         step_raw = (raw.view(B, T, per) * w.view(B, T, per)).sum(-1) / w.view(B, T, per).sum(
             -1).clamp_min(1)
         return (err.view(B, T, per * D).sum(-1).flatten(),
-                (w.view(B, T, per).sum(-1) * D).flatten(), step_raw.flatten())
+                (w.view(B, T, per).sum(-1) * width).flatten(), step_raw.flatten())
 
     @torch.no_grad()
     def _calibrate(self, S, d):
@@ -231,7 +250,8 @@ class HTLoss(nn.Module):
         with torch.autocast(device_type=scale.device.type, enabled=False):
             S, d, raw = self._events(ctx["pred"][self.stream].float(),
                                      ctx["target"][self.stream].float(),
-                                     (ctx.get("valid") or {}).get(self.stream), raw=scale.float())
+                                     (ctx.get("valid") or {}).get(self.stream), raw=scale.float(),
+                                     dims=(ctx.get("dim_valid") or {}).get(self.stream))
             if not bool(self.calibrated):
                 self._calibrate(S.detach(), d)
             sigma = F.softplus(raw + self.scale_bias) + self.min_scale

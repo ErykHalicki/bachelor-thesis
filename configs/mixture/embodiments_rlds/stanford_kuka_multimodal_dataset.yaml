@@ -1,0 +1,8 @@
+name: stanford_kuka_multimodal_dataset
+source: stanford_kuka_multimodal_dataset
+action:
+  - {from: action, kind: delta}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

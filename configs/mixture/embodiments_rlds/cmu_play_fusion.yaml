@@ -1,0 +1,8 @@
+name: cmu_play_fusion
+source: cmu_play_fusion
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

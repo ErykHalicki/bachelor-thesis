@@ -1,0 +1,12 @@
+name: fmb
+source: fmb
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.eef_pose}
+  - {from: observation.state_gripper_pose}
+cameras:
+  - {name: image_side_1, from: observation.images.image_side_1, role: primary, view: left}
+  - {name: image_side_2, from: observation.images.image_side_2, role: exterior, view: right}
+  - {name: image_wrist_1, from: observation.images.image_wrist_1, role: wrist, view: wrist}
+  - {name: image_wrist_2, from: observation.images.image_wrist_2, role: wrist, view: wrist}

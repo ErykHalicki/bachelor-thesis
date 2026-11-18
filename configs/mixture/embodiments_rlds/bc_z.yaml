@@ -1,0 +1,12 @@
+name: bc_z
+source: bc_z
+action:
+  - {from: action.future.xyz_residual, dims: [0, 1, 2], kind: delta}
+  - {from: action.future.axis_angle_residual, dims: [0, 1, 2], kind: delta}
+  - {from: action.future.target_close, dims: [0], kind: discrete}
+state:
+  - {from: observation.present.xyz}
+  - {from: observation.present.axis_angle}
+  - {from: observation.present.sensed_close}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

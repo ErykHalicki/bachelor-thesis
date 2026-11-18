@@ -759,6 +759,13 @@ class PredictiveModel(BaseAlgorithm):
                 target_valid[name] = v
         if target_valid:
             ctx["valid"] = target_valid
+        # `valid.dims`: a (B, dim) bool field marking the coordinates a sample fills (a
+        # mixture's zero-padded action width); the losses average over those alone
+        dim_valid = {name: batch[spec["valid"]["dims"]].bool()
+                     for name, spec in self.predict_spec.items()
+                     if (spec.get("valid") or {}).get("dims")}
+        if dim_valid:
+            ctx["dim_valid"] = dim_valid
         if valid or target_valid:
             # every stream's token validity, for the terms scoring encoder latents (sigreg)
             ctx["latent_valid"] = {**valid, **target_valid}

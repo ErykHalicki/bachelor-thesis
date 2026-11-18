@@ -1,0 +1,10 @@
+name: berkeley_mvp
+source: berkeley_mvp
+action:
+  - {from: action, dims: [0, 1, 2, 3, 4, 5, 6], kind: absolute}
+  - {from: action, dims: [7], kind: discrete}
+state:
+  - {from: observation.joint_pos}
+  - {from: observation.gripper}
+cameras:
+  - {name: hand_image, from: observation.images.hand_image, role: primary, view: wrist}

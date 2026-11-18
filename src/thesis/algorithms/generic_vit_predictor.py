@@ -606,9 +606,10 @@ class GenericViTTrunk(nn.Module):
         self.time_concat = set()
         for name, spec in noisy_streams + [(n, s) for n, s in query_streams
                                            if n in self.zero_queries]:
-            kind, mlp_dim = _token_io(name, spec, "token_in", model_dim)
+            # not `mlp_dim`: that is the trunk blocks' own MLP width, read further down
+            kind, in_mlp_dim = _token_io(name, spec, "token_in", model_dim)
             if kind == "mlp":
-                self.noisy_proj[name] = MLPInputLayer(int(spec["dim"]), model_dim, mlp_dim)
+                self.noisy_proj[name] = MLPInputLayer(int(spec["dim"]), model_dim, in_mlp_dim)
                 self.time_concat.add(name)
             else:
                 assert block == "dit", (
@@ -1344,8 +1345,13 @@ class GenericViTPredictor(PredictiveModel):
 
         ref = next(iter({**clean, **x_t, **targets}.values()))
         queries = self.predictor.query_tokens(ref, scale=True)
-        pred, scale = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
-                                     meta=meta, valid=valid, return_scale=True)
+        scale = {}
+        if self.predictor.scale_modes:
+            pred, scale = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
+                                         meta=meta, valid=valid, return_scale=True)
+        else:
+            pred = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
+                                  meta=meta, valid=valid)
         for n, rows in clean_rows.items():
             # a stream handed in clean is conditioning on that row, not a prediction: its
             # velocity target needs the x0 the clean input no longer carries, so the row

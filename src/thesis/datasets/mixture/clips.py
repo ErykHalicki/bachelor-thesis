@@ -42,11 +42,16 @@ Options beyond RoboJEPA's recipe:
         the one shown at t + 1, K = round(fps / wm_fps) of them (an uneven gap is
         resampled to K by each group's `kind`, clock.resample), normalized per dim, and
         flattened to K * D before the zero padding.
+  state: proprio | recorded  (default proprio) `recorded` serves the embodiment file's
+        `state:` groups, concatenated, normalized by the manifest's percentiles, instead of
+        the `proprio:` layout; with `actions: commanded` the file then needs no `proprio:`.
 
 Fields, each T rows on one time axis (the spec's windows are checked against it):
 
-    observation.images  uint8 (T, V, 3, H, W)     V = largest view group
+    observation.images  uint8 (T, V, 3, H, W)     V = largest view group; with a single
+                                                  view slot the V axis is dropped
     action              float (T, pad_size)       action t moves state t to t + 1
+    action_valid        bool  (pad_size,)         True on the dims the embodiment fills
     observation.state   float (T, pad_size)
     step_valid          bool  (T,)                False past the episode end
     view_valid          bool  (V,)                False for an empty camera slot
@@ -76,7 +81,7 @@ from .source import LeRobotV3Source
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FIELDS = ("observation.images", "action", "observation.state", "step_valid", "view_valid",
-          "view_id", "camera_uid", "embodiment_id")
+          "view_id", "camera_uid", "embodiment_id", "action_valid")
 CLIP = 5.0
 STATS_PAIRS = 500_000
 
@@ -139,9 +144,14 @@ class Member:
     per-dim scales its actions and states are normalized with."""
 
     def __init__(self, data_root, embodiment, emb_id, wm_fps, min_frames, split,
-                 clock="stride", actions="proprio_delta", normalize=True, scales=None):
-        if embodiment.proprio is None:
+                 clock="stride", actions="proprio_delta", normalize=True, scales=None,
+                 state="proprio"):
+        if state not in ("proprio", "recorded"):
+            raise ValueError(f"unknown state '{state}'; use proprio or recorded")
+        if embodiment.proprio is None and (state == "proprio" or actions == "proprio_delta"):
             raise ValueError(f"{embodiment.name}: a RoboJEPA clip needs a `proprio:` layout")
+        if state == "recorded" and not embodiment.state:
+            raise ValueError(f"{embodiment.name}: `state: recorded` needs `state:` groups")
         if clock not in ("stride", "time"):
             raise ValueError(f"unknown clock '{clock}'; use stride or time")
         if actions not in ("proprio_delta", "commanded"):
@@ -158,8 +168,12 @@ class Member:
         self.clock = clock
         self.actions = actions
         self.substeps = max(1, int(round(self.ratio)))
-        pr = embodiment.proprio
-        self.proprio = np.ascontiguousarray(self.source.column(pr.column)[:, list(pr.dims)])
+        # `proprio` is the per-frame state a clip carries, whichever convention fills it
+        if state == "recorded":
+            self.proprio, _ = embodiment.assemble(self.source, embodiment.state)
+        else:
+            pr = embodiment.proprio
+            self.proprio = np.ascontiguousarray(self.source.column(pr.column)[:, list(pr.dims)])
         self.cameras = list(embodiment.cameras)
 
         manifest = load_manifest(data_root, embodiment, self.source)
@@ -189,7 +203,11 @@ class Member:
                     raise ValueError(f"{embodiment.name}: stored {k} stats have {len(mid)} dims, "
                                      f"the data has {widths[k]}")
         elif normalize:
-            state = quantile_scale(*np.quantile(self.proprio, [0.01, 0.99], axis=0))
+            if state == "recorded":
+                st = manifest["stats"]["state"]
+                state = quantile_scale(st["q01"], st["q99"])
+            else:
+                state = quantile_scale(*np.quantile(self.proprio, [0.01, 0.99], axis=0))
             if actions == "commanded":
                 st = manifest["stats"]["action"]
                 action = quantile_scale(st["q01"], st["q99"])
@@ -276,13 +294,14 @@ class MixtureSource(BaseSource):
             emb_dir = REPO_ROOT / emb_dir
         clock = str(cfg.get("clock", "stride"))
         actions = str(cfg.get("actions", "proprio_delta"))
+        state = str(cfg.get("state", "proprio"))
         normalize = bool(cfg.get("normalize_per_embodiment", True))
         stored = self._stored_scales(stats, clock, actions, normalize, list(cfg.members))
         self.members = [
             Member(cfg.data_root, load_embodiment(emb_dir / f"{name}.yaml"), i,
                    float(cfg.get("fps", 5)), int(cfg.get("min_frames", 4)), split,
                    clock=clock, actions=actions, normalize=normalize,
-                   scales=stored.get(name) if stored else None)
+                   scales=stored.get(name) if stored else None, state=state)
             for i, name in enumerate(cfg.members)
         ]
         for m in self.members:
@@ -411,10 +430,15 @@ class MixtureSource(BaseSource):
             states = apply_scale(states, member.scales["state"])
         S, A = states.shape[1], actions.shape[1]
 
+        rows = self._rows
+        # only the frames some spec reads are decoded; the rest of the window is metadata
+        shown = min(n, rows.get("observation.images", T))
         images = torch.zeros(T, V, 3, *self.size, dtype=torch.uint8)
         for slot, c in enumerate(cams):
-            raw = member.source.frames(member.cameras[c].column, episode, frame_idx)
-            images[:n, slot] = self._transform(raw, rng)
+            raw = member.source.frames(member.cameras[c].column, episode, frame_idx[:shown])
+            images[:shown, slot] = self._transform(raw, rng)
+        if V == 1:
+            images = images[:, 0]
         action = np.zeros((T, P), np.float32)
         action[:n, :A] = actions[:n]
         state = np.zeros((T, P), np.float32)
@@ -426,7 +450,6 @@ class MixtureSource(BaseSource):
         camera_uid = np.zeros(V, np.int64)
         camera_uid[:len(cams)] = [self.camera_offset[member.emb_id] + c for c in cams]
 
-        rows = self._rows
         return {
             "observation.images": images[:rows.get("observation.images", T)],
             "action": torch.from_numpy(action[:rows.get("action", T)]),
@@ -436,6 +459,7 @@ class MixtureSource(BaseSource):
             "view_id": torch.from_numpy(view_id),
             "camera_uid": torch.from_numpy(camera_uid),
             "embodiment_id": torch.tensor(member.emb_id, dtype=torch.long),
+            "action_valid": torch.arange(P) < A,
         }
 
     def _transform(self, frames, rng):

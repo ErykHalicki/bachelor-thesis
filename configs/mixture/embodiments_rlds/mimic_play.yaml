@@ -1,0 +1,11 @@
+name: mimic_play
+source: mimic_play
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state.ee_pose}
+  - {from: observation.state.gripper_position}
+cameras:
+  - {name: image_front_image_1, from: observation.images.image.front_image_1, role: primary, view: left}
+  - {name: image_front_image_2, from: observation.images.image.front_image_2, role: exterior, view: right}
+  - {name: wrist_image_wrist_image, from: observation.images.wrist_image.wrist_image, role: wrist, view: wrist}

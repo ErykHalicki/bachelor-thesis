@@ -1,0 +1,8 @@
+name: utokyo_pr2_opening_fridge
+source: utokyo_pr2_opening_fridge
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

@@ -1,0 +1,10 @@
+name: aloha_mobile
+source: aloha_mobile
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: cam_high, from: observation.images.cam_high, role: primary, view: top}
+  - {name: cam_left_wrist, from: observation.images.cam_left_wrist, role: wrist, view: wrist}
+  - {name: cam_right_wrist, from: observation.images.cam_right_wrist, role: wrist, view: wrist}

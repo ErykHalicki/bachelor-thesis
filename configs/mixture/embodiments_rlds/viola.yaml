@@ -1,0 +1,12 @@
+name: viola
+source: viola
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.rotation_delta, kind: delta}
+  - {from: action.gripper_closedness_action, kind: discrete}
+state:
+  - {from: observation.ee_states}
+  - {from: observation.gripper_states}
+cameras:
+  - {name: agentview_rgb, from: observation.images.agentview_rgb, role: primary, view: default}
+  - {name: eye_in_hand_rgb, from: observation.images.eye_in_hand_rgb, role: wrist, view: wrist}

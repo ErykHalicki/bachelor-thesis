@@ -1,0 +1,11 @@
+name: stanford_robocook
+source: stanford_robocook
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image_1, from: observation.images.image_1, role: primary, view: default}
+  - {name: image_2, from: observation.images.image_2, role: exterior, view: default}
+  - {name: image_3, from: observation.images.image_3, role: exterior, view: default}
+  - {name: image_4, from: observation.images.image_4, role: exterior, view: default}

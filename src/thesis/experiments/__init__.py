@@ -8,6 +8,7 @@ exp_registry = dict(
     smoke=SmokeExperiment,
     decoder=DecoderExperiment,
     robojepa=GenericExperiment,
+    oxe_policy=GenericExperiment,
 )
 
 

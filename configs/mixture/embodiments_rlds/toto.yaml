@@ -1,0 +1,10 @@
+name: toto
+source: toto
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.rotation_delta, kind: delta}
+  - {from: action.open_gripper, kind: discrete}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}

@@ -1,0 +1,11 @@
+name: columbia_cairlab_pusht_real
+source: columbia_cairlab_pusht_real
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.rotation_delta, kind: delta}
+  - {from: action.gripper_closedness_action, kind: discrete}
+state:
+  - {from: observation.robot_state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: wrist_image, from: observation.images.wrist_image, role: wrist, view: wrist}

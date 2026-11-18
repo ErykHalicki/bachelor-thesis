@@ -1,0 +1,11 @@
+name: berkeley_autolab_ur5
+source: berkeley_autolab_ur5
+action:
+  - {from: action.world_vector, kind: delta}
+  - {from: action.rotation_delta, kind: delta}
+  - {from: action.gripper_closedness_action, kind: discrete}
+state:
+  - {from: observation.robot_state}
+cameras:
+  - {name: image, from: observation.images.image, role: primary, view: default}
+  - {name: hand_image, from: observation.images.hand_image, role: wrist, view: wrist}

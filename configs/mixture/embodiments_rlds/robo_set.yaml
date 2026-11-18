@@ -1,0 +1,11 @@
+name: robo_set
+source: robo_set
+action:
+  - {from: action, kind: absolute}
+state:
+  - {from: observation.state}
+cameras:
+  - {name: image_left, from: observation.images.image_left, role: primary, view: left}
+  - {name: image_right, from: observation.images.image_right, role: exterior, view: right}
+  - {name: image_top, from: observation.images.image_top, role: exterior, view: top}
+  - {name: image_wrist, from: observation.images.image_wrist, role: wrist, view: wrist}
