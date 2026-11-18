@@ -88,9 +88,11 @@ class Normalizer:
 
     def __init__(self, stats, method="mean_std"):
         self.method = method
+        # `mixture` is the mixture backend's per-embodiment scales (datasets/mixture/clips.py),
+        # applied in the dataset itself, not a batch key
         self.stats = {
             key: {stat: torch.tensor(v, dtype=torch.float32) for stat, v in per_key.items()}
-            for key, per_key in stats.items()
+            for key, per_key in stats.items() if key != "mixture"
         }
 
     def to(self, device):
@@ -158,6 +160,11 @@ class NormalizedSource:
             for key in keys:
                 if key in self.stats:
                     self.stats[key]["clip"] = float(clip)
+        # the mixture backend's own per-embodiment scales ride along, so wrapping it does
+        # not drop them from the checkpoint
+        inner = getattr(dataset, "stats", None) or {}
+        if "mixture" in inner and "mixture" not in self.stats:
+            self.stats = {**self.stats, "mixture": inner["mixture"]}
         self.normalizer = Normalizer(self.stats, method=method)
 
     def __len__(self):

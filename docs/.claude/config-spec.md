@@ -159,12 +159,28 @@ whose predicted tokens are the previous latents, and the two can be mixed in one
 | --- | --- | --- | --- | --- |
 | `flow` (default) | noise `x_t` | `x1 - x0` (a velocity) | timestep + `cond` streams | its own positions |
 | `direct` | reads its `input` stream's tokens | its own encoded `index` window | `cond` streams only | none |
+| `mse` | learned query tokens, or zero actions at t = 0 (`query: zeros`) | its own encoded `index` window | timestep (t = 0) + `cond` streams | its own positions |
 
 A `direct` stream adds no tokens: it names an `input` token stream, reads a head off that
 stream's token slice, and its `index` is the *target* window, paired positionally with the
 input window (equal lengths). So `input: "-2..0"` with `index: "-1..1"` means frame -2 predicts
 -1 ... and frame 0 predicts +1 — autoregressive teacher forcing, with the token count identical
 at train and eval (eval reads the last position).
+
+An `mse` stream regresses its clean target in one forward pass. `query: learned` (the default)
+feeds one learned embedding per token; `query: zeros` is the readout of Zhou et al. 2026: the
+stream enters through a flow stream's `token_in`, fed an all-zero chunk at the noise endpoint
+t = 0, so a `type: flow` checkpoint of the same arm loads into it unchanged (`init_from`).
+It cannot share a trunk with flow streams, whose `t` it would read.
+
+`scale: token | pool | step` on an `mse` stream adds a raw residual-scale head for an `ht`
+loss term (heteroscedastic Student-t regression, see Losses). `token` adds ONE learned
+readout token that attends what the stream attends plus the stream itself and that no token
+attends, so the mean is bit-identical with or without it and inference leaves it out;
+`pool` is the paper's from-scratch head (mean of the stream's trunk outputs before the final
+norm, projected to d/4, concatenated with the mean conditioning token at trunk input);
+`step` reads a scale off every token, one Student-t per step instead of per chunk. All
+three heads are zero-initialized.
 
 AdaLN conditioning is a concatenation of fixed slots (timestep first when any stream is `flow`,
 then one per `via: cond` stream), each zeroed where it does not apply. The timestep slot is
@@ -351,6 +367,15 @@ solve that actually runs. **It costs `num_steps` extra predictor passes per trai
 and the backward runs the whole chain**, so activation memory grows with `num_steps` too.
 Every `integration` term shares one solve, so their `num_steps` must agree. Nothing shipped
 scores this at nonzero weight.
+
+`ht` (`{type: ht, stream, weight, nu_ratio: 4, nu: null, min_scale: 1e-3, scale_bias:
+calibrate}`) is the heteroscedastic Student-t NLL of an `mse` stream with a `scale:` head:
+`sigma = softplus(raw + scale_bias) + min_scale`, `L = 0.5 (nu + d) log1p(|r|^2 / (nu
+sigma^2)) + d log sigma` per chunk (per step under `scale: step`), summed and divided by the
+valid coordinate count so it sits on MSE's scale. `nu = nu_ratio * d` unless a fixed `nu` is
+given. `scale_bias: calibrate` sets the bias from the first batch's residual RMS (a
+checkpointed buffer). It logs `mse` (comparable to a `prediction` term), `sigma` and
+`weight`, the mean factor by which large residuals are down-weighted.
 
 Losses read a per-call context (encoder `latent`, predictor `pred`, regression `target`, plus
 `raw` windows and the `integrated` endpoint for the terms that ask for them), so a term can

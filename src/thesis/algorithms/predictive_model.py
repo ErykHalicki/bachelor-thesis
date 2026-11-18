@@ -256,6 +256,12 @@ class PredictiveModel(BaseAlgorithm):
         for term, _ in self._rollout_terms:
             if cfg.predict.get(term.stream, {}).get("type") != "direct":
                 raise ValueError(f"rollout term names '{term.stream}', not a direct stream")
+        for t in loss_cfg:
+            if t.get("type") == "ht" and not cfg.predict.get(t["stream"], {}).get("scale"):
+                raise ValueError(
+                    f"ht term names '{t['stream']}', which declares no `scale:` head "
+                    f"(token | pool | step) for its residual scale"
+                )
         # weight decay on every >= 2-D trainable tensor but those matching `no_decay`
         # (fnmatch over parameter names); 1-D tensors (biases, norms) never decay
         self.optim_groups = dict(cfg.get("optim_groups") or {})
@@ -368,22 +374,44 @@ class PredictiveModel(BaseAlgorithm):
                 x = encoder(x, **kwargs)
         return x
 
-    def optim_params(self):
-        """Two AdamW groups when `optim_groups.no_decay` is set: decayed >= 2-D tensors,
-        and everything else (1-D tensors and the named patterns) at weight_decay 0.
-        Frozen parameters are left out."""
+    def optim_params(self, lr=None):
+        """Parameter groups from `optim_groups`; without it, every parameter in one group.
+
+          no_decay  fnmatch patterns over parameter names kept at weight_decay 0, beside
+                    every 1-D tensor (biases, norms); everything else >= 2-D decays
+          lr_scale  {pattern: factor}: a parameter matching a pattern trains at
+                    factor * `lr` (the optimizer's base LR), e.g. `encoders.levjepa.*: 0.1`
+                    for an unfrozen encoder slower than the predictor; the first matching
+                    pattern wins. The LR schedule multiplies every group alike.
+
+        Frozen parameters are left out.
+        """
         if not self.optim_groups:
             return self.parameters()
         patterns = list(self.optim_groups.get("no_decay") or [])
-        decay, keep = [], []
+        scales = {str(k): float(v) for k, v in dict(self.optim_groups.get("lr_scale") or {}).items()}
+        if scales and lr is None:
+            raise ValueError("optim_groups.lr_scale needs the optimizer's base lr")
+        groups = {}
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if param.ndim < 2 or any(fnmatch.fnmatchcase(name, p) for p in patterns):
-                keep.append(param)
-            else:
-                decay.append(param)
-        return [{"params": decay}, {"params": keep, "weight_decay": 0.0}]
+            no_decay = param.ndim < 2 or any(fnmatch.fnmatchcase(name, p) for p in patterns)
+            scale = next((v for p, v in scales.items() if fnmatch.fnmatchcase(name, p)), 1.0)
+            groups.setdefault((no_decay, scale), []).append(param)
+        unused = [p for p in scales
+                  if not any(fnmatch.fnmatchcase(n, p) for n, _ in self.named_parameters())]
+        if unused:
+            raise ValueError(f"optim_groups.lr_scale patterns {unused} match no parameter")
+        out = []
+        for (no_decay, scale), params in sorted(groups.items(), key=lambda kv: kv[0]):
+            group = {"params": params}
+            if no_decay:
+                group["weight_decay"] = 0.0
+            if scale != 1.0:
+                group["lr"] = lr * scale
+            out.append(group)
+        return out
 
     def cacheable_streams(self):
         """The spec entries whose frozen-root encoder output can be precomputed, as
@@ -687,7 +715,8 @@ class PredictiveModel(BaseAlgorithm):
     def _forward_rollout(self, stream, steps, prefix, clean, sources, cond, targets, pred,
                          meta, valid, target_valid):
         """A `rollout` term's autoregressive passes: a list (one per prefix) of per-step
-        (pred, target, valid) triples. See `losses.RolloutLoss`."""
+        (pred, target, valid, copy) tuples, `copy` being the last true latent before the
+        rollout (the no-motion baseline). See `losses.RolloutLoss`."""
         raise NotImplementedError
 
     def _build_context(self, batch):
@@ -710,8 +739,19 @@ class PredictiveModel(BaseAlgorithm):
         seeds = self.build_flow_seeds(batch, {**clean, **sources, **cond, **hidden}, training=True)
         meta, valid = self._trunk_inputs(batch)
         extra = {"meta": meta, "valid": valid} if (meta or valid) else {}
-        pred, target = self._forward_train(clean, sources, cond, targets, seeds=seeds, **extra)
+        # a paradigm with `scale:` streams also returns their raw residual scales
+        pred, target, *scale = self._forward_train(clean, sources, cond, targets,
+                                                   seeds=seeds, **extra)
         ctx = {"latent": latent, "pred": pred, "target": target}
+        if scale and scale[0]:
+            ctx["scale"] = scale[0]
+        # the no-motion baseline of a `direct` stream: its input latent at each position,
+        # read as a prediction of the next step (input position p predicts target p)
+        copy = {name: latent[spec["input"]] for name, spec in self.predict_spec.items()
+                if spec.get("type") == "direct" and spec.get("input") in latent
+                and latent[spec["input"]].shape == target[name].shape}
+        if copy:
+            ctx["copy"] = copy
         target_valid = {}
         for name, spec in self.predict_spec.items():
             v = self._token_valid(name, spec, batch)

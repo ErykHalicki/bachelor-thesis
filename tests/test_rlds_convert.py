@@ -1,8 +1,10 @@
 """RLDS -> LeRobot v3 conversion on a synthetic dataset, read back through LeRobotV3Source."""
+import importlib.util
 import io
 import json
 import shutil
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,8 +14,12 @@ PIL = pytest.importorskip("PIL.Image")
 if shutil.which("ffmpeg") is None:
     pytest.skip("needs ffmpeg", allow_module_level=True)
 
-from thesis.datasets.mixture import rlds
-from thesis.datasets.mixture.source import LeRobotV3Source
+from thesis.datasets.mixture.source import LeRobotV3Source  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location(
+    "convert_rlds", Path(__file__).resolve().parents[1] / "scripts" / "oxe" / "convert_rlds.py")
+rlds = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rlds)
 
 
 def _varint(n):

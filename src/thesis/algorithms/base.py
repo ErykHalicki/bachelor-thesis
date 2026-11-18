@@ -20,10 +20,11 @@ class BaseAlgorithm(nn.Module):
     def loss(self, batch):
         raise NotImplementedError
 
-    def optim_params(self):
+    def optim_params(self, lr=None):
         """What the training loop hands the optimizer. Every parameter as one group by
         default; override to give some of them their own settings (a wrapped policy that
-        trains its vision backbone at a different learning rate, say).
+        trains its vision backbone at a different learning rate, say). `lr` is the
+        optimizer's base learning rate, for groups that scale it.
         """
         return self.parameters()
 

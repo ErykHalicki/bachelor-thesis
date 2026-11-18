@@ -315,7 +315,9 @@ def write_dataset(root, fps, lengths, state, cameras):
     (root / "data" / "chunk-000").mkdir(parents=True)
     rows = np.arange(total)
     pq.write_table(pa.table({
-        "action": pa.array(np.zeros((total, 2), np.float32).tolist(), pa.list_(pa.float32())),
+        # commands: the global row index and its parity, so a chunk names its own rows
+        "action": pa.array(np.stack([rows, rows % 2], 1).astype(np.float32).tolist(),
+                           pa.list_(pa.float32())),
         "observation.state": pa.array(state.astype(np.float32).tolist(), pa.list_(pa.float32())),
         "index": rows,
     }), root / "data" / "chunk-000" / "file-000.parquet")
@@ -422,10 +424,10 @@ def test_state_delta_composes_rotations(mixture):
 def test_actions_and_frames_follow_the_stride(mixture):
     from thesis.datasets.mixture.clips import MixtureSource
 
-    src = MixtureSource(source_cfg(*mixture), split="train")
+    src = MixtureSource(source_cfg(*mixture, normalize_per_embodiment=False), split="train")
     arm = src.members[0]
     assert arm.stride == 2
-    frame_idx, states = arm.window(1, 3, 8)
+    frame_idx, _, states = arm.window(1, 3, 8)
     np.testing.assert_array_equal(frame_idx, 3 + 2 * np.arange(8))
     item = src._clip(arm, 1, 3, [0, 1], None)
     row = int(arm.source.first_row[1])
@@ -436,6 +438,7 @@ def test_actions_and_frames_follow_the_stride(mixture):
     np.testing.assert_allclose(item["observation.state"][1, 0] - item["observation.state"][0, 0],
                                item["action"][0, 0], atol=1e-5)
     assert item["view_id"].tolist() == [4, 2]
+    assert item["camera_uid"].tolist() == [0, 1]
 
 
 def test_held_out_clips_are_fixed_and_disjoint(mixture):
@@ -475,3 +478,172 @@ def test_unfrozen_levjepa_checkpoints_its_blocks():
     torch.testing.assert_close(out, ref)
     for g, p in zip(grads, [p for p in enc.parameters() if p.grad is not None]):
         torch.testing.assert_close(p.grad, g, rtol=1e-4, atol=1e-5)
+
+
+def test_actions_and_states_are_normalized_per_embodiment(mixture):
+    from thesis.datasets.mixture.clips import MixtureSource
+
+    raw = MixtureSource(source_cfg(*mixture, normalize_per_embodiment=False), split="train")
+    src = MixtureSource(source_cfg(*mixture), split="train")
+    for m_raw, m in zip(raw.members, src.members):
+        a = raw._clip(m_raw, 1, 0, [0], None)
+        b = src._clip(m, 1, 0, [0], None)
+        stats = src.stats["mixture"]["embodiments"][m.embodiment.name]
+        n = int(b["step_valid"].sum())
+        for field, key in (("action", "action"), ("observation.state", "state")):
+            mid = torch.tensor(stats[key]["mid"])
+            half = torch.tensor(stats[key]["half"])
+            S = len(mid)
+            want = ((a[field][:n, :S] - mid) / half).clamp(-5, 5)
+            torch.testing.assert_close(b[field][:n, :S], want, atol=1e-5, rtol=1e-5)
+            assert torch.all(b[field][:, S:] == 0)
+    # arm: x moves 0.1 a frame, so every 2-frame delta is 0.2 -- no spread, only centred
+    arm = src.stats["mixture"]["embodiments"]["arm"]
+    assert arm["action"]["half"][0] == 1.0 and abs(arm["action"]["mid"][0] - 0.2) < 1e-5
+
+
+def test_time_clock_shows_the_nearest_frame(mixture):
+    from thesis.datasets.mixture.clips import MixtureSource
+
+    stride = MixtureSource(source_cfg(*mixture, fps=4, normalize_per_embodiment=False),
+                           split="train")
+    time = MixtureSource(source_cfg(*mixture, fps=4, clock="time",
+                                    normalize_per_embodiment=False), split="train")
+    assert stride.members[0].stride == 3                       # 10 fps at 4 Hz
+    frame_idx, _, _ = stride.members[0].window(1, 0, 8)
+    np.testing.assert_array_equal(frame_idx, 3 * np.arange(8))
+    frame_idx, state_idx, _ = time.members[0].window(1, 0, 8)
+    np.testing.assert_array_equal(frame_idx, np.round(np.arange(8) * 2.5))
+    np.testing.assert_array_equal(state_idx, np.round(np.arange(9) * 2.5))
+
+
+def test_commanded_actions_are_native_chunks(mixture):
+    from thesis.datasets.mixture.clips import MixtureSource
+
+    src = MixtureSource(source_cfg(*mixture, actions="commanded",
+                                   normalize_per_embodiment=False), split="train")
+    arm = src.members[0]
+    assert arm.substeps == 2 and arm.action_width == 4         # K = 10 / 5, D = 2
+    item = src._clip(arm, 1, 3, [0], None)
+    row = int(arm.source.first_row[1])
+    frames = 3 + 2 * np.arange(7)
+    a = item["action"][:, :4].view(7, 2, 2).numpy()
+    np.testing.assert_allclose(a[:, 0, 0], row + frames)       # the shown frame's command
+    np.testing.assert_allclose(a[:, 1, 0], row + frames + 1)   # and the one after it
+    np.testing.assert_allclose(a[:, :, 1], (row + frames[:, None] + [0, 1]) % 2)
+    assert torch.all(item["action"][:, 4:] == 0)
+
+    timed = MixtureSource(source_cfg(*mixture, fps=4, clock="time", actions="commanded",
+                                     normalize_per_embodiment=False), split="train")
+    arm = timed.members[0]
+    assert arm.substeps == 2                                   # round(2.5)
+    item = timed._clip(arm, 1, 0, [0], None)
+    row = int(arm.source.first_row[1])
+    # step 0 spans frames 0..1 (2 commands, kept), step 1 frames 2..4 (3, resampled to 2)
+    a = item["action"][:, :4].view(7, 2, 2).numpy()
+    np.testing.assert_allclose(a[0, :, 0], [row, row + 1])
+    np.testing.assert_allclose(a[1, :, 0], [row + 2, row + 3.5])
+
+
+def test_camera_roles_choose_each_groups_pool(mixture):
+    from thesis.datasets.mixture.clips import MixtureSource
+
+    src = MixtureSource(source_cfg(*mixture, camera_roles={1: ["wrist"]}), split="train")
+    assert src.num_cameras == 3
+    for i in range(30):
+        item = src[i]
+        if not item["view_valid"][1]:                          # one-view clip: arm's wrist
+            assert int(item["embodiment_id"]) == 0 and item["view_id"].tolist()[0] == 2
+            assert item["camera_uid"].tolist()[0] == 1
+        if int(item["embodiment_id"]) == 1:
+            assert item["camera_uid"].tolist()[0] == 2
+    with pytest.raises(ValueError, match="no member has 2 cameras"):
+        MixtureSource(source_cfg(*mixture, camera_roles={"default": ["exterior"]}),
+                      split="train")
+
+
+def test_camera_instance_separates_cameras_sharing_a_view():
+    conditioning, predict, model = spec()
+    model["camera"] = {**model["camera"], "instance": {"field": "camera_uid", "num": 8}}
+    trunk = GenericViTTrunk(conditioning, predict, **model).eval()
+    assert torch.all(trunk.camera_instance_embed.weight == 0)
+    with torch.no_grad():
+        trunk.camera_instance_embed.weight.normal_()
+    tokens, meta = trunk_inputs()
+    meta = {**meta, "camera_uid": torch.tensor([[0, 1], [0, 1], [2, 3]])}
+    out = trunk(tokens, meta=meta)["frames_next"]
+    other = {**meta, "camera_uid": torch.tensor([[4, 1], [0, 1], [2, 3]])}  # same view id
+    out2 = trunk(tokens, meta=other)["frames_next"]
+    assert not torch.allclose(out[0], out2[0])
+    torch.testing.assert_close(out[1:], out2[1:])
+
+
+def test_copy_baseline_is_logged_beside_the_losses():
+    pytest.importorskip("rotary_embedding_torch")
+    model = GenericViTPredictor(algorithm_cfg()).eval()
+    b = batch()
+    with torch.no_grad():
+        out = model.loss(b)
+    assert {"loss/frames_next/copy", "loss/rollout_eval/copy",
+            "loss/rollout_eval/copy/step1", "loss/rollout_eval/copy/step4"} <= set(out)
+    # the baseline reads only the encoder: a different predictor moves the loss, not it
+    with torch.no_grad():
+        for p in model.predictor.parameters():
+            p.add_(torch.randn_like(p))
+        again = model.loss(b)
+    assert not torch.isclose(again["loss/frames_next"], out["loss/frames_next"])
+    for key in ("loss/frames_next/copy", "loss/rollout_eval/copy/step3"):
+        torch.testing.assert_close(again[key], out[key])
+
+
+def test_lr_scale_gives_matching_parameters_their_own_group():
+    pytest.importorskip("rotary_embedding_torch")
+    cfg = algorithm_cfg()
+    cfg.optim_groups.lr_scale = {"encoders.pix.*": 0.1}
+    model = GenericViTPredictor(cfg)
+    groups = model.optim_params(lr=1e-3)
+    names = {id(p): n for n, p in model.named_parameters()}
+    for g in groups:
+        pix = {names[id(p)].startswith("encoders.pix.") for p in g["params"]}
+        assert len(pix) == 1
+        assert g.get("lr", 1e-3) == pytest.approx(1e-4 if pix == {True} else 1e-3)
+    assert sum(len(g["params"]) for g in groups) == sum(
+        1 for p in model.parameters() if p.requires_grad)
+    cfg.optim_groups.lr_scale = {"encoders.nope.*": 0.1}
+    with pytest.raises(ValueError, match="match no parameter"):
+        GenericViTPredictor(cfg).optim_params(lr=1e-3)
+
+
+def test_mixture_scales_travel_with_the_checkpoint(mixture, tmp_path):
+    from thesis.datasets import build_dataset
+    from thesis.utils.checkpoint import load_checkpoint, save_checkpoint
+    from thesis.utils.normalize import Normalizer
+
+    src = build_dataset(source_cfg(*mixture), split="train")
+    stats = src.stats
+    model = torch.nn.Linear(2, 2)
+    model.norm_stats = stats
+    opt = torch.optim.AdamW(model.parameters())
+    save_checkpoint(model, opt, tmp_path, 1)
+    restored = torch.nn.Linear(2, 2)
+    load_checkpoint(restored, torch.optim.AdamW(restored.parameters()), tmp_path / "model.pt")
+    assert restored.norm_stats == stats
+    assert Normalizer(restored.norm_stats).stats == {}          # not a batch key
+
+    # handed back, the stored scales win over what the data on disk would give
+    doctored = json.loads(json.dumps(stats))
+    doctored["mixture"]["embodiments"]["arm"]["state"]["half"] = [
+        2 * h for h in doctored["mixture"]["embodiments"]["arm"]["state"]["half"]]
+    val = build_dataset(source_cfg(*mixture), split="val", norm_stats_override=doctored)
+    fresh = build_dataset(source_cfg(*mixture), split="val")
+    a, b = val._clip(val.members[0], 1, 0, [0], None), fresh._clip(fresh.members[0], 1, 0, [0], None)
+    n = int(a["step_valid"].sum())
+    torch.testing.assert_close(a["observation.state"][:n, :7] * 2, b["observation.state"][:n, :7],
+                               atol=1e-4, rtol=1e-4)
+    with pytest.raises(ValueError, match="actions=proprio_delta"):
+        build_dataset(source_cfg(*mixture, actions="commanded"), split="val",
+                      norm_stats_override=stats)
+    with pytest.raises(ValueError, match="no entry for members"):
+        cfg = source_cfg(*mixture)
+        build_dataset(cfg, split="val", norm_stats_override={"mixture": {
+            **stats["mixture"], "embodiments": {"arm": stats["mixture"]["embodiments"]["arm"]}}})

@@ -56,7 +56,7 @@ class TrainingMixin:
             loaded, kept = load_pretrained_weights(self.algo, init_from)
             acc.print(f"init_from {init_from}: loaded {loaded}; kept init {kept}")
 
-        opt = build_optimizer(self.algo.optim_params(), exp.optimizer)
+        opt = build_optimizer(self.algo.optim_params(lr=float(exp.optimizer.lr)), exp.optimizer)
         start_step = load_checkpoint(self.algo, opt, self.ckpt_path) if self.ckpt_path else 0
 
         # a model already carrying norm_stats was filled from a checkpoint: reuse them, or

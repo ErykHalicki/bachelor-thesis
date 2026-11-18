@@ -288,7 +288,7 @@ class LeRobotPolicy(BaseAlgorithm):
             self._tokenize_language(out, batch)
         return out
 
-    def optim_params(self):
+    def optim_params(self, lr=None):
         """The policy's own parameter groups (ACT gives its vision backbone a separate
         learning rate)."""
         return self.policy.get_optim_params()

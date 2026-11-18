@@ -56,7 +56,8 @@ def build_dataset(cfg, norm_stats_override=None, augment=True, split=None,
         source = OCBenchSource(cfg, split=split)
     elif backend == "mixture":
         from .mixture.clips import MixtureSource
-        source = MixtureSource(cfg, split=split)
+        # its per-embodiment scales live in norm_stats["mixture"] (see clips.py)
+        source = MixtureSource(cfg, split=split, stats=norm_stats_override)
     else:
         raise ValueError(
             f"backend '{backend}' not installed. "

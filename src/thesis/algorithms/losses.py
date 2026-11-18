@@ -14,7 +14,9 @@ anything else, so a term can only ever touch what it is meant to:
     ctx["valid"]       per predict stream, (B, N) bool target validity, present for streams
                        declaring `valid:` (padded camera slots, steps past an episode end)
     ctx["rollout"]     per `rollout` term label, its autoregressive rollout's per-step
-                       (pred, target, valid) triples
+                       (pred, target, valid, copy) tuples
+    ctx["copy"]        per `direct` predict stream, its input latent aligned with the
+                       target: the no-motion baseline, logged as `loss/<label>/copy`
 
 A term's `weight` also decides WHEN it runs. `weight: 0.0` makes it an observed term: evals
 compute and report it under the usual `loss/<label>` name, training skips it entirely and
@@ -30,12 +32,14 @@ regularizes `latent` toward an isotropic Gaussian. Because `sigreg` only indexes
 `ctx["latent"]`, it structurally cannot be applied to a prediction.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 __all__ = ["SIGReg", "PredictionLoss", "SIGRegLoss", "AEReconLoss", "IntegrationLoss",
-           "RolloutLoss", "masked_error", "build_loss_term"]
+           "RolloutLoss", "HTLoss", "masked_error", "build_loss_term"]
 
 
 def masked_error(pred, target, valid=None, norm="mse", per_step=None):
@@ -131,17 +135,119 @@ class PredictionLoss(nn.Module):
         # a single-stream term logs under its stream name; a term spanning several
         # logs under the loss type's label
         self.label = self.streams[0] if len(self.streams) == 1 else label
+        self.step_logs = {}
+
+    def _error(self, pred, ctx, n, valid):
+        if self.norm == "mse" and self.reduce == "token" and n not in valid:
+            return F.mse_loss(pred, ctx["target"][n])
+        return masked_error(pred, ctx["target"][n], valid.get(n), self.norm,
+                            self.tokens_per_step.get(n) if self.reduce == "step" else None)
 
     def forward(self, ctx):
+        """Also keeps, in `step_logs["copy"]`, the same error for predicting each `direct`
+        stream's next latent as its current one: what a model that has learned no dynamics
+        scores, so `loss/<label>` reads against it."""
         valid = ctx.get("valid") or {}
-        if self.norm == "mse" and self.reduce == "token" and not any(
-                n in valid for n in self.streams):
-            return sum(F.mse_loss(ctx["pred"][n], ctx["target"][n]) for n in self.streams)
-        return sum(
-            masked_error(ctx["pred"][n], ctx["target"][n], valid.get(n), self.norm,
-                         self.tokens_per_step.get(n) if self.reduce == "step" else None)
-            for n in self.streams
-        )
+        copy = ctx.get("copy") or {}
+        with torch.no_grad():
+            baseline = [self._error(copy[n].detach(), ctx, n, valid)
+                        for n in self.streams if n in copy]
+        self.step_logs = ({"copy": sum(baseline).detach()}
+                          if baseline and len(baseline) == len(self.streams) else {})
+        return sum(self._error(ctx["pred"][n], ctx, n, valid) for n in self.streams)
+
+
+class HTLoss(nn.Module):
+    """Heteroscedastic Student-t regression (Zhou et al. 2026, "Residual Modeling Closes the
+    Regression and Generative Policy Gap"), ported from their `ht_loss` package.
+
+    The residual r of one event -- a whole chunk for `scale: token`/`pool`, one step for
+    `scale: step` -- is a multivariate Student-t with the event's own scale:
+
+        sigma = softplus(raw + scale_bias) + min_scale
+        L     = 0.5 (nu + d) log1p(|r|^2 / (nu sigma^2)) + d log sigma
+        loss  = sum L / sum d
+
+    d counts the event's valid coordinates (`valid` drops padded steps), nu = `nu_ratio`
+    * d unless a fixed `nu` is given (`nu_ratio -> inf` is the heteroscedastic Gaussian).
+    The per-element reduction keeps the loss on MSE's scale, so a flow recipe's learning
+    rate carries over. Computed in fp32 with autocast off.
+
+    `scale_bias: calibrate` (the default) sets the bias on the first call from the batch's
+    residual RMS, inverse-softplus'd, so a zero-init scale head starts at the model's
+    actual error -- their `calibrate_sigma`, on one batch instead of 300 windows. The bias
+    is a buffer, so a resumed run keeps it.
+
+    Logs `mse` (the same number a `prediction` term reports, for comparing runs), `sigma`
+    and `weight`, the mean gradient weight (nu + d) / (nu + |r|^2 / sigma^2) that
+    down-weights large residuals.
+    """
+
+    def __init__(self, stream, weight, nu=None, nu_ratio=4.0, min_scale=1e-3,
+                 scale_bias="calibrate", tokens_per_step=1, label=None):
+        super().__init__()
+        assert nu is None or float(nu) > 0, "nu must be positive"
+        assert float(nu_ratio) > 0, "nu_ratio must be positive"
+        self.stream = stream
+        self.weight = weight
+        self.nu = None if nu is None else float(nu)
+        self.nu_ratio = float(nu_ratio)
+        self.min_scale = float(min_scale)
+        self.tokens_per_step = int(tokens_per_step)
+        self.label = label or stream
+        calibrate = scale_bias == "calibrate"
+        self.register_buffer("scale_bias", torch.tensor(0.0 if calibrate else float(scale_bias)))
+        self.register_buffer("calibrated", torch.tensor(not calibrate))
+        self.step_logs = {}
+
+    def _events(self, pred, target, valid, raw):
+        """(S, d, raw) per event: squared-residual sum, valid coordinate count, raw scale."""
+        err = (pred - target).square()
+        B, N, D = err.shape
+        w = (torch.ones(B, N, device=err.device, dtype=err.dtype) if valid is None
+             else valid.to(device=err.device, dtype=err.dtype))
+        err = err * w.unsqueeze(-1)
+        if raw.shape == (B, 1):
+            return err.sum((1, 2)), w.sum(1) * D, raw[:, 0]
+        assert raw.shape == (B, N), f"scale is {tuple(raw.shape)}, expected (B, 1) or (B, N)"
+        per = self.tokens_per_step
+        T = N // per
+        step_raw = (raw.view(B, T, per) * w.view(B, T, per)).sum(-1) / w.view(B, T, per).sum(
+            -1).clamp_min(1)
+        return (err.view(B, T, per * D).sum(-1).flatten(),
+                (w.view(B, T, per).sum(-1) * D).flatten(), step_raw.flatten())
+
+    @torch.no_grad()
+    def _calibrate(self, S, d):
+        rms = (S.sum() / d.sum().clamp_min(1)).sqrt().item()
+        positive = max(rms - self.min_scale, 1e-6)
+        self.scale_bias.fill_(positive + math.log(-math.expm1(-positive)))
+        self.calibrated.fill_(True)
+
+    def forward(self, ctx):
+        scale = (ctx.get("scale") or {}).get(self.stream)
+        assert scale is not None, (
+            f"ht term on '{self.stream}' found no scale: declare `scale:` on the stream")
+        with torch.autocast(device_type=scale.device.type, enabled=False):
+            S, d, raw = self._events(ctx["pred"][self.stream].float(),
+                                     ctx["target"][self.stream].float(),
+                                     (ctx.get("valid") or {}).get(self.stream), raw=scale.float())
+            if not bool(self.calibrated):
+                self._calibrate(S.detach(), d)
+            sigma = F.softplus(raw + self.scale_bias) + self.min_scale
+            dim = d.clamp_min(1)
+            nu = self.nu_ratio * dim if self.nu is None else torch.full_like(dim, self.nu)
+            ratio = S / (nu * sigma.square())
+            per_event = 0.5 * (nu + d) * torch.log1p(ratio) + d * sigma.log()
+            loss = per_event.sum() / d.sum().clamp_min(1)
+        with torch.no_grad():
+            live = d > 0
+            self.step_logs = {
+                "mse": S.sum() / d.sum().clamp_min(1),
+                "sigma": sigma[live].mean(),
+                "weight": ((nu + d) / (nu + S / sigma.square()))[live].mean(),
+            }
+        return loss
 
 
 class RolloutLoss(nn.Module):
@@ -157,7 +263,9 @@ class RolloutLoss(nn.Module):
 
     `prefix: random` draws one tau per batch (training), `all` averages over every tau the
     batch's shortest clip allows (RoboJEPA's held-out eval). The per-step errors are kept
-    in `step_logs` (step 1 = the teacher-forced prediction), for `loss/<label>/step<k>`.
+    in `step_logs` (step 1 = the teacher-forced prediction), for `loss/<label>/step<k>`,
+    beside `copy/step<k>`: the error of holding the last true latent fixed, and `copy`,
+    that baseline weighted like the loss.
     """
 
     def __init__(self, stream, steps, weight, prefix="random", norm="l1", reduce="step",
@@ -182,11 +290,20 @@ class RolloutLoss(nn.Module):
             ref = ctx["pred"][self.stream]
             return ref.new_zeros(()).float()
         per_step = [[] for _ in range(self.steps)]
+        copy_step = [[] for _ in range(self.steps)]
         for steps in rollouts:
-            for h, (pred, target, valid) in enumerate(steps):
+            for h, (pred, target, valid, *copy) in enumerate(steps):
                 per_step[h].append(masked_error(pred, target, valid, self.norm, self.per_step))
+                if copy:
+                    with torch.no_grad():
+                        copy_step[h].append(masked_error(copy[0], target, valid, self.norm,
+                                                         self.per_step))
         means = [torch.stack(v).mean() for v in per_step]
         self.step_logs = {f"step{h + 1}": m.detach() for h, m in enumerate(means)}
+        if all(copy_step):
+            copies = [torch.stack(v).mean().detach() for v in copy_step]
+            self.step_logs.update({f"copy/step{h + 1}": m for h, m in enumerate(copies)})
+            self.step_logs["copy"] = sum(copies[1:]) / self.steps
         return sum(means[1:]) / self.steps
 
 
@@ -501,6 +618,13 @@ def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
         return PredictionLoss(streams, weight, label=kind, norm=term.get("norm", "mse"),
                               reduce=term.get("reduce", "token"),
                               tokens_per_step=tokens_per_step)
+    if kind == "ht":
+        stream = term["stream"]
+        return HTLoss(stream, weight, nu=term.get("nu"), nu_ratio=term.get("nu_ratio", 4.0),
+                      min_scale=term.get("min_scale", 1e-3),
+                      scale_bias=term.get("scale_bias", "calibrate"),
+                      tokens_per_step=(tokens_per_step or {}).get(stream, 1),
+                      label=term.get("label"))
     if kind == "rollout":
         return RolloutLoss(term["stream"], int(term["steps"]), weight,
                            prefix=term.get("prefix", "random"), norm=term.get("norm", "l1"),

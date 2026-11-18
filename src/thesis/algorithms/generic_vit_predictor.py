@@ -105,6 +105,42 @@ def is_mse(spec):
     return spec.get("type") == "mse"
 
 
+SCALE_MODES = ("token", "pool", "step")
+
+
+def scale_token_name(stream):
+    return f"{stream}.scale"
+
+
+class PooledScaleHead(nn.Module):
+    """The HT paper's from-scratch transformer scale head (RegressionPolicy,
+    `TransformerScaleHead`): one raw scalar per chunk from the mean of the stream's trunk
+    outputs (before the final norm, through a d -> d/4 projection) concatenated with the
+    mean of the conditioning tokens as they enter the trunk (their "memory"). Their third
+    branch pools the network's action INPUT, which under HT is all zeros, so it is a
+    constant that the output bias absorbs and is left out. Output layer zero-init, so the
+    initial scale is exactly the loss's calibrated bias."""
+
+    def __init__(self, model_dim):
+        super().__init__()
+        self.proj = nn.Linear(model_dim, model_dim // 4)
+        nn.init.normal_(self.proj.weight, std=0.02)
+        nn.init.zeros_(self.proj.bias)
+        self.out = nn.Linear(model_dim // 4 + model_dim, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, stream_out, memory):
+        return self.out(torch.cat([self.proj(stream_out.mean(1)), memory], dim=-1))
+
+
+def _zero_linear(model_dim):
+    head = nn.Linear(model_dim, 1)
+    nn.init.zeros_(head.weight)
+    nn.init.zeros_(head.bias)
+    return head
+
+
 def _clean_in(name, spec, model_dim):
     """A conditioning token stream's projection into the trunk: `token_in: {type: mlp}`
     (the default, the SwiGLU lift every clean stream used to get, inner width `mlp_dim`,
@@ -273,11 +309,15 @@ class GenericViTTrunk(nn.Module):
           embodiment        {field, num, streams}: a zero-init learned vector per
                             embodiment id (batch field `field`, (B,) long) added to every
                             token of `streams`
-          camera            {field, num, streams, input_embedding, attention_bias}: the
-                            semantic camera id of each view slot (batch field, (B, views)
-                            long). input_embedding adds a zero-init vector per id to the
-                            stream's tokens; attention_bias gives every prenorm block a
-                            zero-init per-id (head_dim) bias on queries and keys after RoPE
+          camera            {field, num, streams, input_embedding, attention_bias,
+                            instance}: the semantic camera id of each view slot (batch
+                            field, (B, views) long). input_embedding adds a zero-init vector
+                            per id to the stream's tokens; attention_bias gives every
+                            prenorm block a zero-init per-id (head_dim) bias on queries and
+                            keys after RoPE. instance: {field, num} adds a second zero-init
+                            table indexed by a per-slot id unique to each physical camera
+                            (the mixture's `camera_uid`), so two cameras sharing a semantic
+                            view (four `default` cameras on one rig) stay distinguishable
           init              null (each module's own) | robojepa: trunc-normal(0.02) on
                             every Linear, zero biases, and each block's attention output
                             and second MLP layer scaled by 1/sqrt(2 * layer)
@@ -315,6 +355,29 @@ class GenericViTTrunk(nn.Module):
         # target directly -- no noise, no integration
         query_streams = [(n, s) for n, s in predict.items() if is_mse(s)]
         direct_streams = [(n, s) for n, s in predict.items() if is_direct(s)]
+        # `query: zeros` (the HT paper's readout): the stream enters through a flow
+        # stream's token_in fed all-zero actions at t = 0 -- the noise endpoint -- instead
+        # of learned query tokens, so a flow checkpoint loads into it unchanged
+        for name, spec in query_streams:
+            assert spec.get("query", "learned") in ("learned", "zeros"), (
+                f"'{name}' query is '{spec.get('query')}'; use learned or zeros")
+        self.zero_queries = [n for n, s in query_streams if s.get("query") == "zeros"]
+        assert not (self.zero_queries and noisy_streams), (
+            f"`query: zeros` streams {self.zero_queries} read the timestep at t = 0, which "
+            f"a flow stream sharing the trunk would overwrite with its own t"
+        )
+        # `scale:` (HT regression): one raw residual scale per chunk (`token`, `pool`) or
+        # per step (`step`) of an mse stream, read by an `ht` loss term
+        self.scale_modes = {}
+        for name, spec in predict.items():
+            mode = spec.get("scale")
+            if mode is None:
+                continue
+            assert is_mse(spec), f"'{name}' declares scale, which only an mse stream takes"
+            assert mode in SCALE_MODES, f"'{name}' scale is '{mode}'; use {SCALE_MODES}"
+            self.scale_modes[name] = mode
+        token_scales = [n for n, m in self.scale_modes.items() if m == "token"]
+        self.scale_parent = {scale_token_name(n): n for n in token_scales}
 
         self.stream_order, self.stream_slices, self.stream_dims = [], {}, {}
         pos_parts, starts, ends = [], [], []
@@ -331,6 +394,16 @@ class GenericViTTrunk(nn.Module):
             s, e = block_intervals(indices.repeat_interleave(spatial), fps, block_size)
             starts.append(s)
             ends.append(e)
+        # a `scale: token` readout sits where its stream's last token does -- same
+        # position, same causal block -- so it sees everything that token sees
+        for scale_name, parent in self.scale_parent.items():
+            i = self.stream_order.index(parent)
+            self.stream_order.append(scale_name)
+            self.stream_slices[scale_name] = slice(offset, offset + 1)
+            offset += 1
+            pos_parts.append({a: v[-1:] for a, v in pos_parts[i].items()})
+            starts.append(starts[i].max().view(1))
+            ends.append(ends[i].max().view(1))
         self.num_tokens = offset
 
         # `seq` needs every stream's token count, so it can only be assigned here, and it
@@ -363,7 +436,8 @@ class GenericViTTrunk(nn.Module):
             "step later, so unmasked the token at index i attends the clean encoded "
             "observation at i + 1 -- the value it is being trained to predict"
         )
-        for name, _ in query_streams:
+        for name in [n for n, _ in query_streams if n not in self.zero_queries] + list(
+                self.scale_parent):
             t_free[self.stream_slices[name]] = True
         for name, spec in direct_streams:
             assert spec.get("token_in") is None, (
@@ -409,6 +483,15 @@ class GenericViTTrunk(nn.Module):
             n for n in clean_names if n not in direct_inputs)
         vis = build_stream_visibility(self.stream_order, clean_names, noisy_names,
                                       attends, legacy_blocked)
+        # a scale readout token is a pure reader: it attends what its stream attends,
+        # plus the stream itself, and no token attends it -- so the mean prediction is
+        # identical with or without it, and inference leaves it out
+        for scale_name, parent in self.scale_parent.items():
+            j, p = self.stream_order.index(scale_name), self.stream_order.index(parent)
+            vis[:, j] = False
+            vis[j] = vis[p]
+            vis[j, p] = True
+            vis[j, j] = True
         assert_no_attention_path(self.stream_order, vis,
                                  (attention or {}).get("no_path"))
         self._vis = vis
@@ -423,8 +506,13 @@ class GenericViTTrunk(nn.Module):
         self.expert_names = []
         self._route_cache = {}
         if experts is not None:
-            self.expert_names, stream_experts = build_expert_ids(
-                self.stream_order, clean_names, noisy_names, experts)
+            # a scale readout token runs through its stream's expert
+            base = [n for n in self.stream_order if n not in self.scale_parent]
+            self.expert_names, base_experts = build_expert_ids(
+                base, clean_names, noisy_names, experts)
+            owner = dict(zip(base, base_experts.tolist()))
+            stream_experts = torch.tensor(
+                [owner[self.scale_parent.get(n, n)] for n in self.stream_order])
             self.register_buffer("all_expert_ids", stream_experts[stream_ids], persistent=False)
         start, end = torch.cat(starts), torch.cat(ends)
         # plain attributes, NOT buffers: the boundaries are float64, which .to(mps)
@@ -472,6 +560,13 @@ class GenericViTTrunk(nn.Module):
 
         # AdaLN cond slots: [timestep?] + one per `via: cond` stream
         self.has_flow = bool(noisy_streams)
+        # a `query: zeros` stream is a flow network read at t = 0: it needs the timestep
+        # embedder and slot a flow trunk has, always fed zeros
+        # A dit trunk with no flow and no `via: cond` stream (learned mse queries
+        # alone) would have no AdaLN slot at all, which cannot run; it gets the timestep
+        # slot, held at t = 0, as a learned constant cond
+        self.has_time = (self.has_flow or bool(self.zero_queries)
+                         or (block == "dit" and not cond_sources))
         self.cond_order = [name for name, _ in cond_sources]
         # independent flow time (UWM): every flow stream carries its own t and its own
         # embedder. A stream's token_in reads its own embedding; the shared AdaLN slot reads
@@ -480,7 +575,7 @@ class GenericViTTrunk(nn.Module):
         # clean, video noisy" (forward dynamics) from the reverse (inverse dynamics).
         self.independent_flow_time = bool(independent_flow_time) and self.has_flow
         self.t_embedder = (TimestepEmbedder(model_dim)
-                           if self.has_flow and not self.independent_flow_time else None)
+                           if self.has_time and not self.independent_flow_time else None)
         self.t_embedders = nn.ModuleDict(
             {name: TimestepEmbedder(model_dim) for name, _ in noisy_streams}
             if self.independent_flow_time else {}
@@ -493,7 +588,7 @@ class GenericViTTrunk(nn.Module):
             "independent_flow_time does not combine with `via: cond` or direct streams yet: "
             "their per-token AdaLN slots assume one shared timestep"
         )
-        cond_dim = model_dim * (int(self.has_flow) + len(cond_sources))
+        cond_dim = model_dim * (int(self.has_time) + len(cond_sources))
 
         # matched on time, so one per-frame action conditions every token of its frame
         for name, spec in cond_sources:
@@ -509,21 +604,37 @@ class GenericViTTrunk(nn.Module):
         self.noisy_proj = nn.ModuleDict()
         # the streams whose token_in reads the bare timestep slot instead of the full cond
         self.time_concat = set()
-        for name, spec in noisy_streams:
+        for name, spec in noisy_streams + [(n, s) for n, s in query_streams
+                                           if n in self.zero_queries]:
             kind, mlp_dim = _token_io(name, spec, "token_in", model_dim)
             if kind == "mlp":
                 self.noisy_proj[name] = MLPInputLayer(int(spec["dim"]), model_dim, mlp_dim)
                 self.time_concat.add(name)
             else:
+                assert block == "dit", (
+                    f"'{name}' token_in is adaln, which reads the AdaLN cond a prenorm "
+                    "trunk does not build"
+                )
                 self.noisy_proj[name] = InputLayer(
                     int(spec["dim"]), model_dim, cond_dim=cond_dim
                 )
         self.query_embed = nn.ParameterDict()
         for name, _ in query_streams:
+            if name in self.zero_queries:
+                continue
             sl = self.stream_slices[name]
             emb = torch.empty(1, sl.stop - sl.start, model_dim)
             nn.init.trunc_normal_(emb, std=0.02)
             self.query_embed[name] = nn.Parameter(emb)
+        self.scale_embed = nn.ParameterDict()
+        self.scale_heads = nn.ModuleDict()
+        for name, mode in self.scale_modes.items():
+            if mode == "token":
+                emb = torch.empty(1, 1, model_dim)
+                nn.init.trunc_normal_(emb, std=0.02)
+                self.scale_embed[name] = nn.Parameter(emb)
+            self.scale_heads[name] = (PooledScaleHead(model_dim) if mode == "pool"
+                                      else _zero_linear(model_dim))
 
         self.heads = nn.ModuleDict()
         for name, spec in noisy_streams + query_streams + direct_streams:
@@ -545,6 +656,7 @@ class GenericViTTrunk(nn.Module):
                               noisy_streams + query_streams + direct_streams]
         self.flow_names = [name for name, _ in noisy_streams]
         self.query_names = [name for name, _ in query_streams]
+        self.query_dims = {name: int(spec["dim"]) for name, spec in query_streams}
         self.direct_input = {name: spec["input"] for name, spec in direct_streams}
 
         self.source_order = [name for name, _ in cross_sources]
@@ -635,6 +747,12 @@ class GenericViTTrunk(nn.Module):
                 self.camera_embed = nn.Embedding(int(self.camera["num"]), model_dim)
                 nn.init.zeros_(self.camera_embed.weight)
             self.meta_fields.append(str(self.camera["field"]))
+            self.camera_instance = dict(self.camera.get("instance") or {}) or None
+            if self.camera_instance:
+                self.camera_instance_embed = nn.Embedding(int(self.camera_instance["num"]),
+                                                          model_dim)
+                nn.init.zeros_(self.camera_instance_embed.weight)
+                self.meta_fields.append(str(self.camera_instance["field"]))
 
     def _robojepa_init(self):
         """RoboJEPA / V-JEPA predictor init: trunc-normal(0.02) Linear weights, zero biases,
@@ -671,6 +789,12 @@ class GenericViTTrunk(nn.Module):
             if self.camera_embed is not None:
                 x = x + (self.camera_embed(sem.clamp(min=0))
                          * (sem >= 0).unsqueeze(-1)).to(x.dtype)
+            if self.camera_instance:
+                inst = meta[self.camera_instance["field"]].long()
+                inst = torch.where(slot >= 0, inst[:, slot.clamp(min=0)],
+                                   torch.full_like(inst[:, :1], -1))
+                x = x + (self.camera_instance_embed(inst.clamp(min=0))
+                         * (inst >= 0).unsqueeze(-1)).to(x.dtype)
             if self.camera.get("attention_bias"):
                 view_ids = sem
         return x, view_ids
@@ -824,7 +948,7 @@ class GenericViTTrunk(nn.Module):
                 t = {name: t for name in self.flow_names}
             temb = {name: self.t_embedders[name](t[name]) for name in t}
             slots.append(sum(temb.values()))
-        elif self.has_flow:
+        elif self.has_time:
             if t is None:
                 t = torch.zeros(batch, device=device, dtype=dtype)
             temb = self.t_embedder(t)
@@ -851,8 +975,25 @@ class GenericViTTrunk(nn.Module):
             return value[layer]
         return value
 
+    def query_tokens(self, ref, names=None, scale=False):
+        """The trunk inputs of the mse streams `names` (default all): a learned query
+        stream's embedding (its value is unused, presence marks it active), a `query:
+        zeros` stream's all-zero action chunk; plus, with `scale`, the readout token of
+        every `scale: token` stream among them. `ref` gives batch, device and dtype."""
+        names = self.query_names if names is None else names
+        out = {}
+        for n in names:
+            if n in self.zero_queries:
+                sl = self.stream_slices[n]
+                out[n] = ref.new_zeros(ref.shape[0], sl.stop - sl.start, self.query_dims[n])
+            else:
+                out[n] = self.query_embed[n]
+            if scale and self.scale_modes.get(n) == "token":
+                out[scale_token_name(n)] = self.scale_embed[n]
+        return out
+
     def forward(self, tokens, t=None, sources=None, source_masks=None, cond=None,
-                use_kv_cache=False, meta=None, valid=None):
+                use_kv_cache=False, meta=None, valid=None, return_scale=False):
         """
         tokens:       dict with one (B, N_name, dim_name) tensor per token stream; clean streams
                       carry encoded observations, flow streams x_t
@@ -865,14 +1006,21 @@ class GenericViTTrunk(nn.Module):
                       `model.camera` read (`meta_fields`)
         valid:        dict token stream -> (B, N_name) bool, False = padding: the token is
                       masked out as a key for every query
+        return_scale: also return dict mse stream -> raw residual scale ((B, 1) for
+                      `scale: token`/`pool`, (B, N) per token for `step`), for every
+                      `scale:` stream whose inputs (and readout token) are present
         Returns dict name -> velocity (flow streams) / next-value prediction (direct streams).
         """
         sources, source_masks, cond = sources or {}, source_masks or {}, cond or {}
         ref = next(iter(tokens.values()))
+        batch = ref.shape[0]
         if self.block_type == "prenorm":
             c, temb = None, None
+            if self.t_embedder is not None:
+                # prenorm has no AdaLN: a `query: zeros` token_in still reads t = 0
+                temb = self.t_embedder(torch.zeros(batch, device=ref.device, dtype=ref.dtype))
         else:
-            c, temb = self._build_cond(t, cond, ref.shape[0], ref.device, ref.dtype)
+            c, temb = self._build_cond(t, cond, batch, ref.device, ref.dtype)
 
         active = [n for n in self.stream_order if n in tokens]
         subset = len(active) < len(self.stream_order)
@@ -881,7 +1029,10 @@ class GenericViTTrunk(nn.Module):
         for name in active:
             sl = self.stream_slices[name]
             if name in self.query_embed:
-                parts.append(self.query_embed[name].expand(ref.shape[0], -1, -1))
+                parts.append(self.query_embed[name].expand(batch, -1, -1))
+                continue
+            if name in self.scale_parent:
+                parts.append(self.scale_embed[self.scale_parent[name]].expand(batch, -1, -1))
                 continue
             assert tokens[name].shape[1] == sl.stop - sl.start, (
                 f"stream '{name}' got {tokens[name].shape[1]} tokens, layout expects "
@@ -899,6 +1050,9 @@ class GenericViTTrunk(nn.Module):
                     tokens[name], self._slice_cond(slot, self.stream_slices[name])
                 ))
         x = torch.cat(parts, dim=1)
+        memory = None
+        if return_scale and "pool" in self.scale_modes.values():
+            memory = self._pool_memory(x, active, valid)
 
         if subset:
             idx, out_slices, attn_mask = self._subset_layout(active)
@@ -933,8 +1087,21 @@ class GenericViTTrunk(nn.Module):
             else:
                 x = block(x, c, layer_sources, masks, freqs, attn_mask, use_kv_cache, *extra)
 
+        scales = {}
+        if return_scale:
+            for name, mode in self.scale_modes.items():
+                if mode == "pool" and name in out_slices:
+                    # the paper's head reads the decoder output before its final norm
+                    scales[name] = self.scale_heads[name](x[:, out_slices[name]], memory)
         if self.final_norm is not None:
             x = self.final_norm(x)
+        if return_scale:
+            for name, mode in self.scale_modes.items():
+                if mode == "token" and scale_token_name(name) in out_slices:
+                    scales[name] = self.scale_heads[name](
+                        x[:, out_slices[scale_token_name(name)]]).squeeze(1)
+                elif mode == "step" and name in out_slices:
+                    scales[name] = self.scale_heads[name](x[:, out_slices[name]]).squeeze(-1)
         out = {}
         for name in self.predict_names:
             src = self.direct_input.get(name, name)
@@ -948,7 +1115,27 @@ class GenericViTTrunk(nn.Module):
             # integrated endpoint in ode_solve, never here
             if name in self.decoders and name not in self.flow_names:
                 out[name] = self.decoders[name](out[name])
-        return out
+        return (out, scales) if return_scale else out
+
+    def _pool_memory(self, x, active, valid):
+        """Mean over the conditioning tokens as they enter the trunk, padded tokens left
+        out: the `pool` scale head's view of the observation. Zeros when the trunk has
+        no conditioning token stream."""
+        valid = valid or {}
+        total, count, off = 0.0, 0.0, 0
+        for name in active:
+            sl = self.stream_slices[name]
+            n = sl.stop - sl.start
+            if name in self._clean_names:
+                w = valid.get(name)
+                w = (x.new_ones(x.shape[0], n) if w is None
+                     else w.to(device=x.device, dtype=x.dtype))
+                total = total + (x[:, off:off + n] * w.unsqueeze(-1)).sum(1)
+                count = count + w.sum(1, keepdim=True)
+            off += n
+        if not torch.is_tensor(total):
+            return x.new_zeros(x.shape[0], x.shape[-1])
+        return total / count.clamp_min(1)
 
     @torch.no_grad()
     def rollout(self, tokens, sources=None, source_masks=None, cond=None, num_steps=10,
@@ -963,8 +1150,9 @@ class GenericViTTrunk(nn.Module):
         """
         assert tokens, "rollout needs at least one clean stream"
         if not self.flow_names:
-            tokens = {**tokens, **{n: self.query_embed[n] for n in self.query_names
-                                   if streams is None or n in streams}}
+            ref = next(iter(tokens.values()))
+            tokens = {**tokens, **self.query_tokens(
+                ref, [n for n in self.query_names if streams is None or n in streams])}
             return self(tokens, None, sources, source_masks, cond=cond, meta=meta, valid=valid)
         assert not (meta or valid), "identity/padding fields reach direct trunks only so far"
         return self.ode_solve(tokens, sources, source_masks, cond=cond, num_steps=num_steps,
@@ -1038,7 +1226,7 @@ class GenericViTTrunk(nn.Module):
             flow_active = [n for n in self.flow_names if n in streams and n not in pinned]
             query_active = [n for n in self.query_names if n in streams]
         # value unused (forward reads the embedding); presence marks the stream active
-        tokens = {**tokens, **{n: self.query_embed[n] for n in query_active}}
+        tokens = {**tokens, **self.query_tokens(ref, query_active)}
         x = {}
         for name in flow_active:
             n = self.stream_slices[name].stop - self.stream_slices[name].start
@@ -1154,15 +1342,16 @@ class GenericViTPredictor(PredictiveModel):
         target.update({n: targets[n] for n in self.predictor.direct_input})
         target.update({n: targets[n] for n in self.predictor.query_names})
 
-        queries = {n: self.predictor.query_embed[n] for n in self.predictor.query_names}
-        pred = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
-                              meta=meta, valid=valid)
+        ref = next(iter({**clean, **x_t, **targets}.values()))
+        queries = self.predictor.query_tokens(ref, scale=True)
+        pred, scale = self.predictor({**clean, **x_t, **queries}, t, sources, cond=cond,
+                                     meta=meta, valid=valid, return_scale=True)
         for n, rows in clean_rows.items():
             # a stream handed in clean is conditioning on that row, not a prediction: its
             # velocity target needs the x0 the clean input no longer carries, so the row
             # scores zero rather than noise
             target[n] = torch.where(rows.view(-1, 1, 1), pred[n].detach(), target[n])
-        return pred, target
+        return pred, target, scale
 
     def _forward_rollout(self, stream, steps, prefix, clean, sources, cond, targets, pred,
                          meta, valid, target_valid):
@@ -1205,13 +1394,15 @@ class GenericViTPredictor(PredictiveModel):
         for tau in taus:
             hist = z.detach().view(B, T, per, D).clone()
             hist[:, tau + 1] = at(tf, tau).detach().to(hist.dtype)
-            out_steps = [(at(tf, tau).detach(), at(tgt, tau), at(tv, tau))]
+            # the copy baseline: the last true latent, held for every step
+            last = at(z, tau).detach()
+            out_steps = [(at(tf, tau).detach(), at(tgt, tau), at(tv, tau), last)]
             for h in range(1, steps):
                 p = tau + h
                 out = self.predictor({**clean, src: hist.flatten(1, 2)}, None, sources,
                                      cond=cond, meta=meta, valid=valid)[stream]
                 step_pred = at(out, p)
-                out_steps.append((step_pred, at(tgt, p), at(tv, p)))
+                out_steps.append((step_pred, at(tgt, p), at(tv, p), last))
                 if p + 1 < T:
                     hist = hist.clone()
                     hist[:, p + 1] = step_pred.detach().to(hist.dtype)

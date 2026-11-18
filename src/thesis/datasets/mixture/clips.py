@@ -4,19 +4,44 @@ One sample is a fixed-length clip from one embodiment, sampled the way RoboJEPA'
 RobotVideoDataset samples one (arXiv 2610.10515, App. B; facebookresearch/robo_jepa):
 
   * a view group first -- V cameras with probability `view_groups[V]` -- then a member by
-    weight among the embodiments with enough cameras for it, an episode uniformly, and a
-    start frame uniformly in [0, max(L - (T + 1) * s, s)), where s = ceil(fps / wm_fps)
-    is the embodiment's frame stride. RoboJEPA partitions its ranks into view groups;
-    here a batch mixes them and the empty slot is masked (`view_valid`).
+    weight among the embodiments with at least V cameras in that group's pool, an episode
+    uniformly, and a start frame uniformly in [0, max(L - (T + 1) * s, s)), where
+    s = ceil(fps / wm_fps) is the embodiment's frame stride. RoboJEPA partitions its ranks
+    into view groups; here a batch mixes them and the empty slot is masked (`view_valid`).
   * T frames at that stride, T + 1 proprioceptive states, and the T actions between them
     as STATE DELTAS: positions and other dims differenced, an euler rotation composed as
     R_{t+1} R_t^T (embodiment `proprio:` layout). Actions and states are zero-padded to
     `pad_size` dims; a clip that runs past its episode end is zero-padded in time and
     `step_valid` marks the real frames.
-  * cameras drawn without replacement, in random order: a one-view clip from the
-    exterior cameras, a two-view clip from all of them. Each view gets its own
-    Inception-style random resized crop (area `scale`, aspect `ratio`) resized to
-    `image_size`; held-out clips are the full frame resized.
+  * cameras drawn without replacement, in random order, from the group's pool:
+    `camera_roles[V]` lists the roles a V-view clip may draw (`default` covers the
+    unlisted V, absent = every camera). RoboJEPA's rule, the default, is
+    `{1: [exterior]}`: a one-view clip from the exterior cameras, more from all of them.
+    Each view gets its own Inception-style random resized crop (area `scale`, aspect
+    `ratio`) resized to `image_size`; held-out clips are the full frame resized.
+
+Options beyond RoboJEPA's recipe:
+
+  normalize_per_embodiment  (default true) each embodiment's actions and states are mapped
+        to [-1, 1] by its own 1st/99th percentiles, per dim, and clipped to +-5. Their
+        units differ by orders of magnitude across Open-X (a robocook step moves ~1e-3,
+        a jaco command is +-0.2, ucsd states reach 8), and every embodiment shares the
+        trunk's input space. State percentiles are over every frame of the proprio dims,
+        state-delta ones over every pair of frames one stride apart, commanded-action ones
+        are the manifest's. A dim with no spread is only centred. The scales are
+        `stats["mixture"]`, which the trainer stores as the model's `norm_stats`, so
+        they are saved in every checkpoint; a resumed run, a held-out eval or a deployed
+        policy passes them back (`build_dataset(norm_stats_override=...)`) and uses them
+        as trained instead of recomputing them from the data on disk.
+  clock: stride | time  (default stride) `time` shows the frame nearest each step's time,
+        round(k * fps / wm_fps), so a 12 fps source runs at 5 Hz rather than the 4 Hz a
+        ceil stride gives it. Both agree whenever fps is a multiple of wm_fps.
+  actions: proprio_delta | commanded  (default proprio_delta) `commanded` serves the
+        recorded command columns the embodiment file's `action:` groups name instead of
+        state deltas: for step t, every native command between the frame shown at t and
+        the one shown at t + 1, K = round(fps / wm_fps) of them (an uneven gap is
+        resampled to K by each group's `kind`, clock.resample), normalized per dim, and
+        flattened to K * D before the zero padding.
 
 Fields, each T rows on one time axis (the spec's windows are checked against it):
 
@@ -26,6 +51,8 @@ Fields, each T rows on one time axis (the spec's windows are checked against it)
     step_valid          bool  (T,)                False past the episode end
     view_valid          bool  (V,)                False for an empty camera slot
     view_id             long  (V,)                semantic camera id (embodiment.VIEW_IDS)
+    camera_uid          long  (V,)                one id per (member, camera), from 0 in
+                                                  member order; `num_cameras` of them
     embodiment_id       long  ()                  index in `members`
 
 A field the spec reads over fewer rows (actions stop one step short of the frames) is
@@ -42,25 +69,48 @@ import torch.nn.functional as F
 
 from ...utils.spec import raw_index, spec_fields, split_index
 from ..base import BaseSource
+from .clock import resample
 from .embodiment import load_embodiment
 from .manifest import load_manifest
 from .source import LeRobotV3Source
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FIELDS = ("observation.images", "action", "observation.state", "step_valid", "view_valid",
-          "view_id", "embodiment_id")
+          "view_id", "camera_uid", "embodiment_id")
+CLIP = 5.0
+STATS_PAIRS = 500_000
 
 
-def state_delta(states, proprio):
-    """(n, S) states in `proprio` order -> (n - 1, S) RoboJEPA state-delta actions."""
-    out = np.diff(states, axis=0)
+def pair_delta(before, after, proprio):
+    """(n, S) states in `proprio` order before and after a step -> (n, S) RoboJEPA
+    state-delta actions."""
+    out = after - before
     if proprio.rotation:
         from scipy.spatial.transform import Rotation
 
         lo = len(proprio.position)
-        rot = Rotation.from_euler("xyz", states[:, lo:lo + 3].astype(np.float64))
-        out[:, lo:lo + 3] = (rot[1:] * rot[:-1].inv()).as_euler("xyz")
+        r0 = Rotation.from_euler("xyz", before[:, lo:lo + 3].astype(np.float64))
+        r1 = Rotation.from_euler("xyz", after[:, lo:lo + 3].astype(np.float64))
+        out[:, lo:lo + 3] = (r1 * r0.inv()).as_euler("xyz")
     return out.astype(np.float32)
+
+
+def state_delta(states, proprio):
+    """(n, S) states in `proprio` order -> (n - 1, S) RoboJEPA state-delta actions."""
+    return pair_delta(states[:-1], states[1:], proprio)
+
+
+def quantile_scale(q01, q99):
+    """Per-dim (mid, half) mapping [q01, q99] onto [-1, 1]; a dim without spread keeps
+    unit scale and is only centred."""
+    q01, q99 = np.asarray(q01, np.float32), np.asarray(q99, np.float32)
+    half = (q99 - q01) / 2
+    return (q99 + q01) / 2, np.where(half > 1e-6, half, 1.0).astype(np.float32)
+
+
+def apply_scale(x, scale):
+    mid, half = scale
+    return np.clip((x - mid) / half, -CLIP, CLIP).astype(np.float32)
 
 
 def resized_crop_box(rng, height, width, scale, ratio):
@@ -85,11 +135,17 @@ def resized_crop_box(rng, height, width, scale, ratio):
 
 
 class Member:
-    """One embodiment of the mixture: its source, split episodes, stride and proprio."""
+    """One embodiment of the mixture: its source, split episodes, clock, proprio, and the
+    per-dim scales its actions and states are normalized with."""
 
-    def __init__(self, data_root, embodiment, emb_id, wm_fps, min_frames, split):
+    def __init__(self, data_root, embodiment, emb_id, wm_fps, min_frames, split,
+                 clock="stride", actions="proprio_delta", normalize=True, scales=None):
         if embodiment.proprio is None:
             raise ValueError(f"{embodiment.name}: a RoboJEPA clip needs a `proprio:` layout")
+        if clock not in ("stride", "time"):
+            raise ValueError(f"unknown clock '{clock}'; use stride or time")
+        if actions not in ("proprio_delta", "commanded"):
+            raise ValueError(f"unknown actions '{actions}'; use proprio_delta or commanded")
         self.embodiment = embodiment
         self.emb_id = emb_id
         self.source = LeRobotV3Source(Path(data_root).expanduser() / embodiment.source)
@@ -97,43 +153,103 @@ class Member:
         self.wm_fps = float(embodiment.wm_fps or wm_fps)
         if self.fps < self.wm_fps:
             raise ValueError(f"{embodiment.name}: {self.fps} fps cannot fill {self.wm_fps} Hz")
-        self.stride = int(math.ceil(self.fps / self.wm_fps - 1e-9))
+        self.ratio = self.fps / self.wm_fps
+        self.stride = int(math.ceil(self.ratio - 1e-9))
+        self.clock = clock
+        self.actions = actions
+        self.substeps = max(1, int(round(self.ratio)))
         pr = embodiment.proprio
         self.proprio = np.ascontiguousarray(self.source.column(pr.column)[:, list(pr.dims)])
         self.cameras = list(embodiment.cameras)
-        self.exterior = [i for i, c in enumerate(self.cameras) if c.role != "wrist"] or \
-            list(range(len(self.cameras)))
 
         manifest = load_manifest(data_root, embodiment, self.source)
         val = np.zeros(self.source.num_episodes, bool)
         val[manifest["val_episodes"]] = True
         side = np.ones_like(val) if split is None else (val if split == "val" else ~val)
         # five states give four frames, RoboJEPA's min_length_to_drop
-        long_enough = self.source.lengths >= (min_frames + 1) * self.stride
+        long_enough = self.source.lengths >= self.reach(min_frames + 1)
         self.episodes = np.flatnonzero(side & long_enough)
         if not len(self.episodes):
             raise ValueError(f"{embodiment.name}: no {split or 'all'} episode is long enough")
         self.hours = manifest["hours"]
 
-    def max_views(self):
-        return len(self.cameras)
+        if actions == "commanded":
+            self.commanded, self.action_kinds = embodiment.assemble(self.source, embodiment.action)
+            self.action_width = self.substeps * self.commanded.shape[1]
+        else:
+            self.action_width = self.proprio.shape[1]
+        self.scales = None
+        if normalize and scales is not None:
+            self.scales = {k: (np.asarray(v["mid"], np.float32), np.asarray(v["half"], np.float32))
+                           for k, v in scales.items()}
+            widths = {"state": self.proprio.shape[1], "action": self.action_width // self.substeps
+                      if actions == "commanded" else self.proprio.shape[1]}
+            for k, (mid, _) in self.scales.items():
+                if len(mid) != widths[k]:
+                    raise ValueError(f"{embodiment.name}: stored {k} stats have {len(mid)} dims, "
+                                     f"the data has {widths[k]}")
+        elif normalize:
+            state = quantile_scale(*np.quantile(self.proprio, [0.01, 0.99], axis=0))
+            if actions == "commanded":
+                st = manifest["stats"]["action"]
+                action = quantile_scale(st["q01"], st["q99"])
+            else:
+                action = quantile_scale(*np.quantile(self._delta_sample(), [0.01, 0.99], axis=0))
+            self.scales = {"state": state, "action": action}
+
+    def _delta_sample(self):
+        """State deltas over pairs of frames one step apart within an episode, at most
+        STATS_PAIRS of them (a fixed draw), for the action percentiles."""
+        gap = self.stride if self.clock == "stride" else self.substeps
+        ep = np.full(len(self.proprio), -1)
+        for i, (first, length) in enumerate(zip(self.source.first_row, self.source.lengths)):
+            ep[first:first + length] = i
+        rows = (np.flatnonzero((ep[:-gap] == ep[gap:]) & (ep[:-gap] >= 0))
+                if len(ep) > gap else np.zeros(0, np.int64))
+        if not len(rows):
+            raise ValueError(f"{self.embodiment.name}: no episode spans one step")
+        if len(rows) > STATS_PAIRS:
+            rows = np.sort(np.random.default_rng(0).choice(rows, STATS_PAIRS, replace=False))
+        return pair_delta(self.proprio[rows], self.proprio[rows + gap], self.embodiment.proprio)
+
+    def reach(self, n):
+        """Native-frame offset of step n from a window's first frame."""
+        if self.clock == "stride":
+            return n * self.stride
+        return np.round(np.asarray(n) * self.ratio).astype(np.int64)
+
+    def pool(self, roles):
+        """Camera indices whose role is in `roles` (None: every camera)."""
+        return [i for i, c in enumerate(self.cameras) if roles is None or c.role in roles]
 
     def window(self, episode, start, frames):
-        """Episode-relative frame indices, and the (n + 1, S) states behind them."""
+        """Episode-relative indices of the n shown frames and of the n + 1 states behind
+        them (state t + 1 sits at frame t + 1), and those (n + 1, S) states."""
         length = int(self.source.lengths[episode])
-        s = self.stride
-        frame_idx = np.arange(start, min(start + frames * s, length), s)
-        state_idx = np.arange(start, min(start + (frames + 1) * s, length), s)
+        state_idx = start + self.reach(np.arange(frames + 1))
+        state_idx = state_idx[state_idx < length]
+        n = min(frames, len(state_idx) - 1)
         row = int(self.source.first_row[episode])
-        states = self.proprio[row + state_idx]
-        n = min(len(frame_idx), len(state_idx) - 1)
-        return frame_idx[:n], states[:n + 1]
+        return state_idx[:n], state_idx[:n + 1], self.proprio[row + state_idx[:n + 1]]
+
+    def action_rows(self, episode, state_idx, states):
+        """(n, action_width) actions of a window, normalized when the member is."""
+        if self.actions == "proprio_delta":
+            actions = state_delta(states, self.embodiment.proprio)
+        else:
+            row = int(self.source.first_row[episode])
+            K, kinds = self.substeps, self.action_kinds
+            chunks = [self.commanded[row + a:row + b] for a, b in zip(state_idx[:-1], state_idx[1:])]
+            actions = np.stack([c if len(c) == K else resample(c, kinds, K) for c in chunks])
+        if self.scales is not None:
+            actions = apply_scale(actions, self.scales["action"])
+        return actions.reshape(len(actions), -1)
 
 
 class MixtureSource(BaseSource):
     provided_modalities = set(FIELDS)
 
-    def __init__(self, cfg, split=None):
+    def __init__(self, cfg, split=None, stats=None):
         self.cfg = cfg
         self.split = split
         self.frames = int(cfg.get("frames_per_clip", 16))
@@ -144,6 +260,13 @@ class MixtureSource(BaseSource):
         self.crop_ratio = tuple(float(v) for v in crop.get("ratio", (1.333, 1.777)))
         groups = {int(k): float(v) for k, v in dict(cfg.get("view_groups") or {1: 1.0}).items()}
         self.view_slots = max(groups)
+        roles = cfg.get("camera_roles")
+        roles = {1: ["exterior"]} if roles is None else dict(roles)
+        default_roles = roles.pop("default", None)
+        roles = {int(k): v for k, v in roles.items()}
+        self.camera_roles = {
+            v: (None if r is None else [str(x) for x in r])
+            for v, r in ((v, roles.get(v, default_roles)) for v in groups)}
         self.seed = int(cfg.get("seed", 0))
         self.train = split != "val"
         self._rows = self._field_rows(cfg)
@@ -151,11 +274,29 @@ class MixtureSource(BaseSource):
         emb_dir = Path(cfg.embodiments_dir)
         if not emb_dir.is_absolute() and not emb_dir.exists():
             emb_dir = REPO_ROOT / emb_dir
+        clock = str(cfg.get("clock", "stride"))
+        actions = str(cfg.get("actions", "proprio_delta"))
+        normalize = bool(cfg.get("normalize_per_embodiment", True))
+        stored = self._stored_scales(stats, clock, actions, normalize, list(cfg.members))
         self.members = [
             Member(cfg.data_root, load_embodiment(emb_dir / f"{name}.yaml"), i,
-                   float(cfg.get("fps", 5)), int(cfg.get("min_frames", 4)), split)
+                   float(cfg.get("fps", 5)), int(cfg.get("min_frames", 4)), split,
+                   clock=clock, actions=actions, normalize=normalize,
+                   scales=stored.get(name) if stored else None)
             for i, name in enumerate(cfg.members)
         ]
+        for m in self.members:
+            width = max(m.action_width, m.proprio.shape[1])
+            if width > self.pad:
+                raise ValueError(f"{m.embodiment.name}: {width}-dim actions or states exceed "
+                                 f"pad_size {self.pad}")
+        self.camera_offset = np.cumsum([0] + [len(m.cameras) for m in self.members])
+        self.num_cameras = int(self.camera_offset[-1])
+        if normalize:
+            self.stats = {"mixture": {"clock": clock, "actions": actions, "embodiments": {
+                m.embodiment.name: {k: {"mid": v[0].tolist(), "half": v[1].tolist()}
+                                    for k, v in m.scales.items()}
+                for m in self.members}}}
         overrides = dict(cfg.get("weights") or {})
         unknown = set(overrides) - set(cfg.members)
         if unknown:
@@ -165,9 +306,11 @@ class MixtureSource(BaseSource):
                          for m in self.members])
         self.groups = []
         for views, prob in sorted(groups.items()):
-            eligible = np.array([m.max_views() >= views for m in self.members])
+            eligible = np.array([len(m.pool(self.camera_roles[views])) >= views
+                                 for m in self.members])
             if not eligible.any():
-                raise ValueError(f"no member has {views} cameras for view group {views}")
+                raise ValueError(f"no member has {views} cameras with roles "
+                                 f"{self.camera_roles[views]} for view group {views}")
             w = np.where(eligible, base, 0.0)
             self.groups.append((views, prob, w / w.sum()))
         self.group_probs = np.array([g[1] for g in self.groups]) / sum(g[1] for g in self.groups)
@@ -180,6 +323,23 @@ class MixtureSource(BaseSource):
                 for _ in range(per):
                     self.items.append((m, int(rng.integers(1 << 62))))
         self.epoch_size = int(cfg.get("epoch_size", 100_000))
+
+    @staticmethod
+    def _stored_scales(stats, clock, actions, normalize, members):
+        """Per-member scales from a checkpoint's `norm_stats`, or None to compute them.
+        Stats made under another action convention or clock would silently mis-scale, so
+        they are refused, as is a member the checkpoint never saw."""
+        entry = (stats or {}).get("mixture")
+        if not entry or not normalize:
+            return None
+        if (entry["clock"], entry["actions"]) != (clock, actions):
+            raise ValueError(f"stored mixture stats are for clock={entry['clock']}, "
+                             f"actions={entry['actions']}; this config has clock={clock}, "
+                             f"actions={actions}")
+        missing = [m for m in members if m not in entry["embodiments"]]
+        if missing:
+            raise ValueError(f"stored mixture stats have no entry for members {missing}")
+        return entry["embodiments"]
 
     def _field_rows(self, cfg):
         """Rows per field, from the spec windows the dataset config interpolates; each
@@ -221,13 +381,14 @@ class MixtureSource(BaseSource):
             views, _, weights = self.groups[g]
             member = self.members[int(rng.choice(len(self.members), p=weights))]
         else:
-            fits = [v for v, _, _ in self.groups if v <= member.max_views()]
+            fits = [v for v, _, _ in self.groups
+                    if len(member.pool(self.camera_roles[v])) >= v]
             views = fits[int(rng.integers(len(fits)))]
         episode = int(member.episodes[int(rng.integers(len(member.episodes)))])
         length = int(member.source.lengths[episode])
-        s = member.stride
-        start = int(rng.integers(0, max(length - (self.frames + 1) * s, s)))
-        pool = member.exterior if views == 1 else list(range(len(member.cameras)))
+        start = int(rng.integers(0, max(length - int(member.reach(self.frames + 1)),
+                                        member.stride)))
+        pool = member.pool(self.camera_roles[views])
         cams = [int(c) for c in rng.choice(pool, size=views, replace=False)]
         return member, episode, start, cams
 
@@ -243,25 +404,27 @@ class MixtureSource(BaseSource):
 
     def _clip(self, member, episode, start, cams, rng):
         T, V, P = self.frames, self.view_slots, self.pad
-        frame_idx, states = member.window(episode, start, T)
+        frame_idx, state_idx, states = member.window(episode, start, T)
         n = len(frame_idx)
-        actions = state_delta(states, member.embodiment.proprio)
-        S = states.shape[1]
-        if S > P:
-            raise ValueError(f"{member.embodiment.name}: {S}-dim proprio exceeds pad_size {P}")
+        actions = member.action_rows(episode, state_idx, states)
+        if member.scales is not None:
+            states = apply_scale(states, member.scales["state"])
+        S, A = states.shape[1], actions.shape[1]
 
         images = torch.zeros(T, V, 3, *self.size, dtype=torch.uint8)
         for slot, c in enumerate(cams):
             raw = member.source.frames(member.cameras[c].column, episode, frame_idx)
             images[:n, slot] = self._transform(raw, rng)
         action = np.zeros((T, P), np.float32)
-        action[:n, :S] = actions[:n]
+        action[:n, :A] = actions[:n]
         state = np.zeros((T, P), np.float32)
         state[:n, :S] = states[:n]
         step_valid = np.arange(T) < n
         view_valid = np.arange(V) < len(cams)
         view_id = np.zeros(V, np.int64)
         view_id[:len(cams)] = [member.cameras[c].view_id for c in cams]
+        camera_uid = np.zeros(V, np.int64)
+        camera_uid[:len(cams)] = [self.camera_offset[member.emb_id] + c for c in cams]
 
         rows = self._rows
         return {
@@ -271,6 +434,7 @@ class MixtureSource(BaseSource):
             "step_valid": torch.from_numpy(step_valid),
             "view_valid": torch.from_numpy(view_valid),
             "view_id": torch.from_numpy(view_id),
+            "camera_uid": torch.from_numpy(camera_uid),
             "embodiment_id": torch.tensor(member.emb_id, dtype=torch.long),
         }
 

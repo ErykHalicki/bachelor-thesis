@@ -1,6 +1,6 @@
 """Convert an Open-X RLDS dataset, read straight from its source, into LeRobot v3.0.
 
-    python -m thesis.datasets.mixture.rlds jaco_play --fps 10 \
+    python scripts/oxe/convert_rlds.py jaco_play --fps 10 \
         --out ~/data/oxe/rlds --tmp ~/data/oxe/_rlds_tmp
 
 Source: the public bucket gs://gresearch/robotics/<name>/<version>/, read over HTTPS, newest

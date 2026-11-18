@@ -22,6 +22,6 @@ LOGS=${LOGS:-outputs/oxe_rlds}
 VENV=${VENV:-$HOME/School/thesis/bachelor-thesis/.venv}
 export PYTHONPATH=$PWD/src
 export LD_LIBRARY_PATH=$(ls -d $VENV/lib/python*/site-packages/nvidia/*/lib | tr "\n" ":")${LD_LIBRARY_PATH:-}
-exec "$VENV/bin/python" -u -m thesis.datasets.mixture.rlds_all \
+exec "$VENV/bin/python" -u scripts/oxe/convert_rlds_all.py \
   --list configs/mixture/rlds_datasets.yaml --out "$OUT" --tmp "$TMP" --logs "$LOGS" \
   --lanes 2 --decode-threads 4 "$@"

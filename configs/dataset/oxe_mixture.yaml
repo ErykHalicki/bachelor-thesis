@@ -20,6 +20,10 @@ frames_per_clip: 16
 min_frames: 4            # RoboJEPA's min_length_to_drop
 pad_size: ${algorithm.pad_size}
 view_groups: {1: 0.5, 2: 0.5}   # clip share per camera count, RoboJEPA's 50/50 split
+camera_roles: {1: [exterior]}   # roles a V-view clip draws from; `default:` for the rest
+normalize_per_embodiment: true  # actions and states to [-1, 1] by each embodiment's q01/q99
+clock: stride            # stride: ceil(fps / wm_fps) frames (RoboJEPA); time: nearest frame
+actions: proprio_delta   # proprio_delta (RoboJEPA) | commanded: native command chunks
 image_size: [240, 320]
 random_resized_crop: {scale: [0.5, 1.0], ratio: [1.333, 1.777]}
 val_windows_per_member: 64

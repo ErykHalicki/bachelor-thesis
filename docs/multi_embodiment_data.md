@@ -2,8 +2,9 @@
 
 Status: first version implemented 2026-11-11 on branch `multi-embodiment` (eryk-pc worktree
 `~/School/thesis/scratch/multiemb/repo`). The sections from "Motivation" on are the original
-proposal; where the implementation differs, the list below wins. Results of the first run are
-in `docs/.claude/multi_embodiment_wm_report.tex`.
+proposal; where the implementation differs, the list below wins. Results of the first run, from
+the single-token prototype (`thesis.wm`, removed 2026-11-13 once the main trainer covered it;
+see commit 6240cb5), are in `docs/.claude/multi_embodiment_wm_report.tex`.
 
 ## What was built, and where it departs from the proposal
 
@@ -11,16 +12,17 @@ in `docs/.claude/multi_embodiment_wm_report.tex`.
 src/thesis/datasets/mixture/reencode.py     NVENC re-encode to 224x224 GOP-2 h264 + episode-table repair
 src/thesis/datasets/mixture/source.py       LeRobotV3Source: raw columns and frames by index
 src/thesis/datasets/mixture/embodiment.py   embodiment files (configs/mixture/embodiments/*.yaml)
-src/thesis/datasets/mixture/clock.py        step times, frame offsets, action chunks
+src/thesis/datasets/mixture/clock.py        resampling an uneven step's actions to K sub-steps
 src/thesis/datasets/mixture/manifest.py     per-(source, embodiment) split and statistics
-src/thesis/datasets/mixture/stream.py       Member, CameraPolicy, MixtureStream, FixedWindows
-src/thesis/datasets/mixture/batch.py        Batch and collate
-src/thesis/wm/model.py          encoder, SIGReg, predictor, WorldModel
-src/thesis/wm/embodiment.py     per-embodiment action normalization and projection
-src/thesis/wm/camera_embedding.py  the five view-identity strategies
-src/thesis/wm/probe.py          pixel decoder probe and PSNR
-src/thesis/wm/train.py          training loop and validation
+src/thesis/datasets/mixture/clips.py        MixtureSource (`backend: mixture`): clips, per-embodiment
+                                            normalization, clock and action options, camera pools
 ```
+
+The model is the generic trunk (`run=robojepa_oxe`, configs/algorithm/robojepa_levjepa_cls.yaml).
+The per-embodiment scales are saved in every checkpoint as `norm_stats["mixture"]`.
+
+The notes below describe the prototype. Its action-window and K rules carry over to `clips.py`
+under `clock: time` and `actions: commanded`; its padding and episode-fit rules do not.
 
 - **Action windows follow the shown frames.** The chunk for step k is the native actions
   between the frame shown at step k and the one shown at step k + 1, not the nominal

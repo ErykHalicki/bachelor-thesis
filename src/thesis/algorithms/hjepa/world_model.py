@@ -247,7 +247,7 @@ class HJEPAWorldModel(BaseAlgorithm):
                     f"'{fs}..{(L1 - 1) * fs}:{fs}'; actions index '0..{L1 * fs - 1}'."
                 )
 
-    def optim_params(self):
+    def optim_params(self, lr=None):
         groups = []
         for level in range(1, self.num_levels + 1):
             params = [p for p in self.hjepa.get_level(level).parameters() if p.requires_grad]

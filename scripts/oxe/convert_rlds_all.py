@@ -1,9 +1,9 @@
 """Convert a whole list of Open-X RLDS datasets into LeRobot v3, a few at a time.
 
-    python -m thesis.datasets.mixture.rlds_all --list configs/mixture/rlds_datasets.yaml \
+    python scripts/oxe/convert_rlds_all.py --list configs/mixture/rlds_datasets.yaml \
         --out ~/data/oxe/rlds --tmp ~/data/oxe/_rlds_tmp --logs outputs/oxe_rlds
 
-Each dataset runs as its own `thesis.datasets.mixture.rlds` process, logging to
+Each dataset runs as its own `convert_rlds.py` process, logging to
 <logs>/<name>.log, `--lanes` of them at once, in list order. Finished datasets are skipped,
 and a failed one is retried `--retries` times; a retry resumes from the dataset's last
 checkpoint, so re-running this command after any interruption continues where it stopped.
@@ -73,7 +73,7 @@ def main():
                 rec.update(status="waiting for disk space")
                 save()
                 time.sleep(300)
-            cmd = [sys.executable, "-u", "-m", "thesis.datasets.mixture.rlds", name,
+            cmd = [sys.executable, "-u", str(Path(__file__).with_name("convert_rlds.py")), name,
                    "--fps", str(entry["fps"]), "--out", str(out_root), "--tmp", str(tmp_root),
                    "--decode-threads", str(a.decode_threads)]
             for attempt in range(a.retries + 1):

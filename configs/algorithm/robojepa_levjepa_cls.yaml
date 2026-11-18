@@ -131,6 +131,9 @@ model:
     streams: [frames]
     input_embedding: true
     attention_bias: true
+    # beyond RoboJEPA: a zero-init vector per physical camera (the mixture's camera_uid),
+    # so cameras sharing a semantic view (robocook's four `default` ones) differ
+    # instance: {field: camera_uid, num: 64}
   rope:
     time:   {share: 0.25, min_period: 1.2566370614359172, max_period: 7066.589504111798}
     height: {share: 0.25, min_period: 6.283185307179586, max_period: 35332.94752055899}
@@ -144,6 +147,8 @@ optim_groups:
     - "predictor.blocks.*.view_bias.weight"
     - "encoders.action_proj.*"
     - "encoders.state_proj.*"
+  # beyond RoboJEPA (one LR for all): train the unfrozen encoder at a fraction of it
+  # lr_scale: {"encoders.levjepa.*": 0.1}
 
 losses:
   - {type: prediction, stream: frames_next, weight: 0.5, norm: l1, reduce: step}

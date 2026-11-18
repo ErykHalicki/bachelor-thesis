@@ -1,6 +1,6 @@
 """Offline index and statistics for one (source, embodiment) pair.
 
-    python -m thesis.datasets.mixture.manifest --config configs/wm/oxe_small.yaml
+    python -m thesis.datasets.mixture.manifest --config configs/dataset/oxe_mixture.yaml
 
 writes `<data_root>/<source>/manifests/<embodiment>.json` for every member of the mixture.
 Training reads manifests only: there is no statistics pass at startup. A manifest does not
@@ -94,12 +94,13 @@ def main():
     from omegaconf import OmegaConf
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--config", required=True)
+    p.add_argument("--config", required=True, help="a `backend: mixture` dataset config")
+    p.add_argument("--val-fraction", type=float, default=0.05)
     args = p.parse_args()
     cfg = OmegaConf.load(args.config)
-    for name in cfg.mixture.members:
+    for name in cfg.members:
         emb = load_embodiment(Path(cfg.embodiments_dir) / f"{name}.yaml")
-        m = build_manifest(cfg.data_root, emb, cfg.val.fraction, cfg.seed)
+        m = build_manifest(cfg.data_root, emb, args.val_fraction, int(cfg.get("seed", 0)))
         print(f"{m['embodiment']:32s} {m['fps']:4.0f} fps  {m['episodes']:5d} episodes  "
               f"{m['hours']:6.2f} h  action {m['action_dim']}  state {m['state_dim']}  "
               f"cameras {[c['name'] for c in m['cameras']]}")
