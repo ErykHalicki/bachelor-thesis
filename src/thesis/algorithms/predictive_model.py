@@ -249,6 +249,14 @@ class PredictiveModel(BaseAlgorithm):
                              modules=self.encoders, tokens_per_step=tokens_per_step)
              for term in loss_cfg]
         )
+        # encoder stages whose (input, output) rows a term reads from ctx["stage_io"]: SADL
+        # measuring the supply into a chain's BN projector
+        self._tap_stages = {t.sadl_supply for t in self.loss_terms
+                            if getattr(t, "sadl_supply", None) is not None}
+        missing = self._tap_stages - set(self.encoders)
+        if missing:
+            raise ValueError(f"sadl supply names {sorted(missing)}, not `encoders:` entries")
+        self._stage_io = None
         self._rollout_terms = [
             (term, float(t.get("weight", 1.0)) != 0.0)
             for term, t in zip(self.loss_terms, loss_cfg) if t.get("type") == "rollout"
@@ -367,11 +375,15 @@ class PredictiveModel(BaseAlgorithm):
             if fields and batch is None:
                 raise ValueError(f"encoder '{stage}' needs batch fields {list(fields)}")
             kwargs = {f: batch[f] for f in fields}
+            x_in = x
             if encoder.frozen and not (torch.is_tensor(x) and x.requires_grad):
                 with torch.no_grad():
                     x = encoder(x, **kwargs)
             else:
                 x = encoder(x, **kwargs)
+            taps = getattr(self, "_stage_io", None)
+            if taps is not None and stage in taps:
+                taps[stage].append((x_in, x))
         return x
 
     def optim_params(self, lr=None):
@@ -721,10 +733,16 @@ class PredictiveModel(BaseAlgorithm):
 
     def _build_context(self, batch):
         self._frame_memo = {}
+        taps = getattr(self, "_tap_stages", None)
+        self._stage_io = {stage: [] for stage in taps} if taps else None
         try:
-            return self._build_context_inner(batch)
+            ctx = self._build_context_inner(batch)
+            if self._stage_io is not None:
+                ctx["stage_io"] = self._stage_io
+            return ctx
         finally:
             self._frame_memo = None
+            self._stage_io = None
 
     def _build_context_inner(self, batch):
         """Assemble the artifacts the loss terms read: per-stream encoder `latent`, predictor
@@ -888,7 +906,8 @@ class PredictiveModel(BaseAlgorithm):
             if self.training and term.weight == 0.0:
                 continue
             val = term(ctx)
-            total = total + term.weight * val
+            # a term's own extra penalty, already weighted (sigreg's SADL supply term)
+            total = total + term.weight * val + getattr(term, "aux_loss", 0.0)
             logs[f"loss/{term.label}"] = val.detach()
             for key, value in getattr(term, "step_logs", {}).items():
                 logs[f"loss/{term.label}/{key}"] = value

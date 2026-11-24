@@ -480,13 +480,29 @@ class SIGRegLoss(nn.Module):
 
     Tokens `ctx["latent_valid"]` marks invalid -- padded steps, empty camera slots -- are
     dropped before the head, so they reach neither its BatchNorm statistics nor any bag.
+
+    `sadl` adds SADL's Supply Regularizer (see `sadl.py`) with SIGReg as its Demand
+    Regularizer: `sadl: 0.01` or `sadl: {weight: 0.01, alpha, ridge, snr, supply}`. Its
+    weighted penalty goes into `aux_loss`, which the model adds to the objective beside
+    `weight * SIGReg`, so `loss/<label>` stays the pure SIGReg value; the supply/demand
+    scores log as `loss/<label>/sadl/*`. The supply site H depends on the layout:
+
+        head: mlp      (the fork) H is the term's input latents, Z the head's output.
+        supply: <enc>  (LeWM's chain, the stream's encoder ending in a BN projector `enc`)
+                       H and Z are that encoder stage's input and output rows, recorded
+                       while the context is built (ctx["stage_io"]); the demand side still
+                       reads this term's own SIGReg and head output.
+
+    With neither, H is the term's input latents and Z its linear head's output. That is
+    legal but a square linear head starts as the identity, so supply and demand watch
+    nearly the same tensor.
     """
 
     CONCAT_DIMS = {"batch": 0, "temporal": 1, "spatial": 2}
 
     def __init__(self, streams, weight, knots=17, num_proj=1024, proj_dim=None,
                  stream_dims=None, statistic="pooled", stream_frames=None, concat=None,
-                 stream_times=None, head="linear", proj_hidden=2048):
+                 stream_times=None, head="linear", proj_hidden=2048, sadl=None):
         super().__init__()
         assert statistic in ("pooled", "per_timestep", "per_spatial"), (
             f"unknown statistic '{statistic}'"
@@ -542,20 +558,41 @@ class SIGRegLoss(nn.Module):
                 nn.init.eye_(self.head.weight)
         else:
             raise ValueError(f"unknown sigreg head '{head}'; use linear or mlp")
+        if sadl is not None and not isinstance(sadl, (int, float)):
+            sadl = dict(sadl)
+        sadl = {"weight": float(sadl)} if isinstance(sadl, (int, float)) else (sadl or {})
+        self.sadl_weight = float(sadl.pop("weight", 0.0))
+        self.sadl_supply = sadl.pop("supply", None)
+        self.supply = None
+        if self.sadl_weight > 0:
+            from thesis.algorithms.sadl import SupplyRegularizer
+            self.supply = SupplyRegularizer(**sadl)
+        elif sadl or self.sadl_supply is not None:
+            raise ValueError("a sadl block needs a positive `weight`")
+        self.aux_loss = 0.0
+        self.step_logs = {}
 
-    def _score(self, grid, mask):
-        """(B, T, S, D) latents and their (B, T, S) validity -> the statistic, averaged over
-        the bags it splits into that hold at least two real rows."""
+    def _bags(self, grid, mask):
+        """The statistic's sample bags holding at least two real rows."""
         if self.statistic == "pooled":
             bags = [grid.flatten(1, 2)[mask.flatten(1, 2)]]
         elif self.statistic == "per_timestep":
             bags = [grid[:, i][mask[:, i]] for i in range(grid.shape[1])]
         else:
             bags = [grid[:, :, j][mask[:, :, j]] for j in range(grid.shape[2])]
-        bags = [bag for bag in bags if bag.shape[0] > 1]
+        return [bag for bag in bags if bag.shape[0] > 1]
+
+    def _score(self, grid, mask):
+        """(B, T, S, D) latents and their (B, T, S) validity -> (the statistic averaged over
+        its bags, the same statistic at Z = 0). SIGReg on zeros is (1 - phi)^2 at every knot
+        of every projection, times the bag's row count, so D(0) is closed form and draws no
+        random projections."""
+        bags = self._bags(grid, mask)
         if not bags:
-            return grid.sum() * 0.0
-        return sum(self.sigreg(bag) for bag in bags) / len(bags)
+            return grid.sum() * 0.0, 0.0
+        at_zero = float(((1.0 - self.sigreg.phi).square() @ self.sigreg.weights).item())
+        d0 = at_zero * sum(bag.shape[0] for bag in bags) / len(bags)
+        return sum(self.sigreg(bag) for bag in bags) / len(bags), d0
 
     def _grid(self, ctx, name):
         z = ctx["latent"][name]
@@ -569,11 +606,33 @@ class SIGRegLoss(nn.Module):
         return z, mask
 
     def _project(self, grid, mask):
-        """The head over the real rows only; the rest stay zero and masked."""
-        rows = self.head(grid[mask])
+        """The head over the real rows only; the rest stay zero and masked. Also returns
+        the (rows in, rows out) pair, SADL's H and Z in the head layout."""
+        h = grid[mask]
+        rows = self.head(h)
         out = rows.new_zeros(*grid.shape[:3], rows.shape[-1])
         out[mask] = rows
-        return out, mask
+        return out, mask, (h, rows)
+
+    def _supply(self, ctx, pairs, demand, d0):
+        """SADL's weighted penalty from this step's (H, Z) row pairs, and its logs."""
+        if self.sadl_supply is None:
+            h = torch.cat([p[0] for p in pairs])
+            z_supply = torch.cat([p[1] for p in pairs])
+        else:
+            taps = (ctx.get("stage_io") or {}).get(self.sadl_supply)
+            if not taps:
+                raise ValueError(
+                    f"sadl supply '{self.sadl_supply}' recorded no encoder calls while the "
+                    f"context was built; it must be a stage of an encoder chain this model "
+                    f"runs (ctx['stage_io'] is filled by PredictiveModel)"
+                )
+            h = torch.cat([x.reshape(-1, x.shape[-1]) for x, _ in taps])
+            z_supply = torch.cat([y.reshape(-1, y.shape[-1]) for _, y in taps])
+        z_demand = torch.cat([p[1] for p in pairs])
+        penalty, logs = self.supply(h, z_supply, demand, d0, z_demand=z_demand)
+        logs["penalty"] = penalty.detach()
+        return self.sadl_weight * penalty, {f"sadl/{key}": v for key, v in logs.items()}
 
     def _join_temporal(self, grids):
         """Frame slices of every stream, each distinct time kept once.
@@ -599,8 +658,19 @@ class SIGRegLoss(nn.Module):
         pairs = [self._grid(ctx, n) for n in self.streams]
         grids, masks = [g for g, _ in pairs], [m for _, m in pairs]
         if self.concat is None:
-            return sum(self._score(*self._project(g, m)) for g, m in pairs)
+            projected = [self._project(g, m) for g, m in pairs]
+        else:
+            projected = [self._project(*self._join(grids, masks))]
+        scores = [self._score(out, mask) for out, mask, _ in projected]
+        value = sum(s for s, _ in scores)
+        self.aux_loss, self.step_logs = 0.0, {}
+        if self.supply is not None:
+            self.aux_loss, self.step_logs = self._supply(
+                ctx, [rows for _, _, rows in projected], value, sum(d0 for _, d0 in scores))
+        return value
 
+    def _join(self, grids, masks):
+        """The term's streams joined along `concat` into one (grid, mask)."""
         dim = self.CONCAT_DIMS[self.concat]
         kept = [i for i in range(4) if i != dim]
         shapes = {n: tuple(g.shape) for n, g in zip(self.streams, grids)}
@@ -614,7 +684,7 @@ class SIGRegLoss(nn.Module):
             grid, mask = self._join_temporal(grids), self._join_temporal(masks)
         else:
             grid, mask = torch.cat(grids, dim=dim), torch.cat(masks, dim=dim)
-        return self._score(*self._project(grid, mask))
+        return grid, mask
 
 
 def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
@@ -672,5 +742,6 @@ def build_loss_term(term, default_streams, stream_dims=None, stream_frames=None,
             statistic=term.get("statistic", "pooled"), stream_frames=stream_frames,
             concat=term.get("concat"), stream_times=stream_times,
             head=term.get("head", "linear"), proj_hidden=int(term.get("proj_hidden", 2048)),
+            sadl=term.get("sadl"),
         )
     raise ValueError(f"unknown loss type '{kind}'")
